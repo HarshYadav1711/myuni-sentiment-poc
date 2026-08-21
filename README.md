@@ -2,14 +2,13 @@
 
 English-first proof of concept for analyzing social activity sentiment on MyUni.
 
-## Current status (Milestone 5)
+## Current status (Milestone 6)
 
 **Working today:**
-- **Text** sentiment (RoBERTa)
-- **Image** (SigLIP 2 visual + OCR + caption + POC fusion)
-- **Speech/audio** branch (FFmpeg + faster-whisper)
-- **Video** end-to-end: ~1 FPS frame sampling → visual aggregate + practical OCR + ASR/speech + optional caption → explainable late fusion
-- JSONL **batch** ingestion for text / image / video
+- **Text** / **image** / **video** multimodal analysis
+- Explainable **late fusion** with editable `config/fusion.yaml` (POC defaults only)
+- Conflict detection that lowers overall confidence when modalities disagree
+- JSONL batch ingestion
 
 **Not implemented yet:** scene detection, native video VLMs, SQLite storage, daily aggregation, Streamlit demo.
 
@@ -55,6 +54,21 @@ Or via batch JSONL (`activity_type: "video"`).
 - Default JSON stays compact; `--video-debug` adds `analysis.video.frame_debug`
 
 Serious decode/probe failures still error; OCR/speech/single-frame failures become warnings with partial evidence.
+
+## Multimodal fusion (Milestone 6)
+
+Transparent **late fusion** (no LLM explanations). Editable POC defaults:
+
+`config/fusion.yaml`
+
+```text
+effective_weight_i = modality_weight_i * confidence_i
+fused_score = sum(score_i * effective_weight_i) / sum(effective_weight_i)
+```
+
+- Label thresholds and modality weights are **POC evaluation defaults only** — not client scoring rules and not scientifically validated.
+- Strong opposing modalities set `analysis.fusion.modality_conflict` and reduce overall confidence.
+- Per-modality evidence remains intact under `analysis.modalities.*`.
 
 ## Models
 

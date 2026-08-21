@@ -14,7 +14,7 @@ from src.analyzers.image import ImageAnalyzer
 from src.analyzers.ocr import is_meaningful_ocr_text
 from src.analyzers.text import TextSentimentAnalyzer
 from src.config import DEFAULT_FUSION, DEFAULT_VIDEO_SAMPLING, FusionConfig, VideoSamplingConfig
-from src.fusion import aggregate_frame_visual_scores, fuse_modality_scores
+from src.fusion import aggregate_frame_visual_scores, fuse_modalities
 from src.media.ffmpeg_utils import (
     FFmpegError,
     FFmpegNotFoundError,
@@ -223,7 +223,7 @@ class VideoAnalyzer:
 
             visual_summary = aggregate_frame_visual_scores(
                 frame_visuals,
-                neutral_band=self.fusion_config.neutral_band,
+                config=self.fusion_config,
             )
             if visual_summary is None:
                 warnings.append("No frames successfully analyzed for visual sentiment")
@@ -265,7 +265,7 @@ class VideoAnalyzer:
                 frame_debug=frame_debug if self.debug else None,
             )
 
-            overall = fuse_modality_scores(
+            overall_fusion = fuse_modalities(
                 {
                     "text": caption_sentiment,
                     "visual": visual_summary,
@@ -274,6 +274,7 @@ class VideoAnalyzer:
                 },
                 config=self.fusion_config,
             )
+            overall = overall_fusion.overall
 
             logger.info(
                 "Video analysis complete path=%s frames=%s/%s overall=%s warnings=%s",
@@ -319,7 +320,7 @@ class VideoAnalyzer:
         if ocr_sentiments:
             aggregated = aggregate_frame_visual_scores(
                 list(ocr_sentiments),
-                neutral_band=self.fusion_config.neutral_band,
+                config=self.fusion_config,
             )
             if aggregated is not None:
                 return aggregated.model_copy(

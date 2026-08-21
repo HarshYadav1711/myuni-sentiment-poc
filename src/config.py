@@ -1,9 +1,10 @@
-"""POC configuration for models, OCR, and explainable fusion weights."""
+"""POC configuration for models, OCR, video sampling, and fusion weights."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Mapping
+from pathlib import Path
+from typing import Any, Mapping, Optional
 
 
 # Exact Hugging Face checkpoint used for zero-shot visual concept scoring.
@@ -21,16 +22,16 @@ OCR_MIN_ALNUM_CHARS = 3
 
 # faster-whisper model size. base.en is CPU-friendly on ~16 GB RAM.
 DEFAULT_WHISPER_MODEL = "base.en"
-# int8 is the conservative CPU compute type for faster-whisper.
 DEFAULT_WHISPER_COMPUTE_TYPE = "int8"
-# Assumed language for English-only MVP (also passed to Whisper).
 DEFAULT_ASR_LANGUAGE = "en"
 
 # Video frame sampling (MVP v1). Scene detection is intentionally not used.
 DEFAULT_VIDEO_SAMPLE_FPS = 1.0
 DEFAULT_VIDEO_MAX_FRAMES = 60
-# OCR at most this many frames (evenly spaced among extracted frames).
 DEFAULT_VIDEO_MAX_OCR_FRAMES = 8
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_FUSION_YAML = _REPO_ROOT / "config" / "fusion.yaml"
 
 
 @dataclass(frozen=True)
@@ -52,24 +53,108 @@ class VideoSamplingConfig:
 
 
 @dataclass(frozen=True)
-class FusionConfig:
-    """POC-only late fusion weights (not client business scoring).
+class FusionThresholds:
+    """POC label thresholds on the fused score (not scientifically validated)."""
 
-    Overall score is a confidence-weighted average of available modality
-    scores. Missing modalities are skipped.
-    Label is derived from the fused score with a small neutral band.
+    positive_above: float = 0.15
+    negative_below: float = -0.15
+
+
+@dataclass(frozen=True)
+class FusionConflictConfig:
+    """POC conflict detection parameters."""
+
+    min_confidence: float = 0.40
+    min_polarity: float = 0.35
+    disagreement_threshold: float = 0.90
+    confidence_penalty: float = 0.50
+
+
+@dataclass(frozen=True)
+class FusionConfig:
+    """POC-only late fusion settings loaded from ``config/fusion.yaml``.
+
+    NOT the client business scoring methodology.
     """
 
     modality_weights: Mapping[str, float] = field(
         default_factory=lambda: {
-            "text": 1.0,  # caption
+            "text": 1.0,
             "visual": 1.0,
             "ocr": 0.8,
             "speech": 1.0,
         },
     )
-    neutral_band: float = 0.15
+    thresholds: FusionThresholds = field(default_factory=FusionThresholds)
+    conflict: FusionConflictConfig = field(default_factory=FusionConflictConfig)
+    note: str = "POC evaluation defaults only; not client scoring rules."
+    source_path: Optional[str] = None
+
+    @property
+    def neutral_band(self) -> float:
+        """Backward-compatible half-width around zero using symmetric thresholds."""
+        return max(abs(self.thresholds.positive_above), abs(self.thresholds.negative_below))
 
 
-DEFAULT_FUSION = FusionConfig()
+def _as_float_map(raw: Any, fallback: Mapping[str, float]) -> dict[str, float]:
+    if not isinstance(raw, dict):
+        return dict(fallback)
+    out: dict[str, float] = {}
+    for key, value in raw.items():
+        try:
+            out[str(key)] = float(value)
+        except (TypeError, ValueError):
+            continue
+    return out or dict(fallback)
+
+
+def load_fusion_config(path: Optional[Path] = None) -> FusionConfig:
+    """Load fusion settings from YAML; fall back to built-in POC defaults."""
+    yaml_path = Path(path) if path is not None else DEFAULT_FUSION_YAML
+    defaults = FusionConfig()
+
+    if not yaml_path.is_file():
+        return FusionConfig(source_path=str(yaml_path))
+
+    try:
+        import yaml
+    except ImportError:
+        return FusionConfig(
+            note=defaults.note + " (PyYAML missing; using built-in defaults)",
+            source_path=str(yaml_path),
+        )
+
+    with yaml_path.open("r", encoding="utf-8") as handle:
+        data = yaml.safe_load(handle) or {}
+
+    weights = _as_float_map(data.get("modality_weights"), defaults.modality_weights)
+    thr_raw = data.get("thresholds") or {}
+    conflict_raw = data.get("conflict") or {}
+
+    thresholds = FusionThresholds(
+        positive_above=float(thr_raw.get("positive_above", defaults.thresholds.positive_above)),
+        negative_below=float(thr_raw.get("negative_below", defaults.thresholds.negative_below)),
+    )
+    conflict = FusionConflictConfig(
+        min_confidence=float(conflict_raw.get("min_confidence", defaults.conflict.min_confidence)),
+        min_polarity=float(conflict_raw.get("min_polarity", defaults.conflict.min_polarity)),
+        disagreement_threshold=float(
+            conflict_raw.get("disagreement_threshold", defaults.conflict.disagreement_threshold),
+        ),
+        confidence_penalty=float(
+            conflict_raw.get("confidence_penalty", defaults.conflict.confidence_penalty),
+        ),
+    )
+    note = str(data.get("note") or defaults.note).strip()
+
+    return FusionConfig(
+        modality_weights=weights,
+        thresholds=thresholds,
+        conflict=conflict,
+        note=note,
+        source_path=str(yaml_path),
+    )
+
+
+DEFAULT_FUSION = load_fusion_config()
 DEFAULT_VIDEO_SAMPLING = VideoSamplingConfig()

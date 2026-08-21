@@ -101,6 +101,20 @@ class SentimentEvidence(BaseModel):
     details: Optional[dict[str, Any]] = None
 
 
+class FusionDiagnostics(BaseModel):
+    """Deterministic explainable diagnostics for late fusion (no LLM)."""
+
+    contributing_modalities: list[str] = Field(default_factory=list)
+    configured_weights: dict[str, float] = Field(default_factory=dict)
+    effective_weights: dict[str, float] = Field(default_factory=dict)
+    modality_conflict: bool = False
+    disagreement_score: float = 0.0
+    thresholds: dict[str, float] = Field(default_factory=dict)
+    explanation: str = ""
+    note: str = "POC evaluation defaults only; not client scoring rules."
+    source_path: Optional[str] = None
+
+
 class ModalityBundle(BaseModel):
     """Per-modality evidence. Unused modalities are omitted (not null-filled)."""
 
@@ -138,6 +152,7 @@ class SpeechAnalysisResult(BaseModel):
 class AnalysisBlock(BaseModel):
     overall: SentimentEvidence
     modalities: ModalityBundle
+    fusion: Optional[FusionDiagnostics] = None
     warnings: list[str] = Field(default_factory=list)
     ocr_text: Optional[str] = Field(
         default=None,

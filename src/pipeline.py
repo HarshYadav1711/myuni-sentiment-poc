@@ -11,7 +11,7 @@ from src.analyzers.image import ImageAnalyzer
 from src.analyzers.text import TextSentimentAnalyzer
 from src.analyzers.video import VideoAnalyzer
 from src.config import DEFAULT_FUSION, DEFAULT_VIDEO_SAMPLING, FusionConfig, VideoSamplingConfig
-from src.fusion import fuse_modality_scores
+from src.fusion import fuse_modalities
 from src.schemas import (
     ActivityAnalysisResult,
     ActivityInput,
@@ -140,13 +140,14 @@ class MyUniSentimentPipeline:
     ) -> ActivityAnalysisResult:
         evidence = self._text_analyzer.analyze(cleaned)
         preview = cleaned if len(cleaned) <= _PREVIEW_LEN else f"{cleaned[:_PREVIEW_LEN]}..."
+        fusion = fuse_modalities({"text": evidence}, config=self._fusion_config)
 
         logger.info(
             "Analyzed text activity_id=%s user_id=%s label=%s score=%.3f",
             activity_id,
             user_id,
-            evidence.label,
-            evidence.score,
+            fusion.overall.label,
+            fusion.overall.score,
         )
 
         return ActivityAnalysisResult(
@@ -162,10 +163,9 @@ class MyUniSentimentPipeline:
                 extra=extra,  # type: ignore[arg-type]
             ),
             analysis=AnalysisBlock(
-                overall=evidence.model_copy(
-                    update={"details": {"source_modality": "text"}},
-                ),
+                overall=fusion.overall,
                 modalities=ModalityBundle(text=evidence),
+                fusion=fusion.diagnostics,
             ),
         )
 
@@ -201,7 +201,7 @@ class MyUniSentimentPipeline:
             visual=image_evidence.visual,
             ocr=image_evidence.ocr_sentiment,
         )
-        overall = fuse_modality_scores(
+        fusion = fuse_modalities(
             {
                 "text": caption_evidence,
                 "visual": image_evidence.visual,
@@ -214,8 +214,8 @@ class MyUniSentimentPipeline:
             "Analyzed image activity_id=%s user_id=%s overall=%s score=%.3f warnings=%s",
             activity.activity_id,
             activity.user_id,
-            overall.label,
-            overall.score,
+            fusion.overall.label,
+            fusion.overall.score,
             len(image_evidence.warnings),
         )
 
@@ -232,8 +232,9 @@ class MyUniSentimentPipeline:
                 extra=activity.metadata,
             ),
             analysis=AnalysisBlock(
-                overall=overall,
+                overall=fusion.overall,
                 modalities=modalities,
+                fusion=fusion.diagnostics,
                 warnings=list(image_evidence.warnings),
                 ocr_text=image_evidence.ocr_text,
             ),
@@ -270,7 +271,7 @@ class MyUniSentimentPipeline:
         )
 
         # Re-fuse so caption is always included even if VideoAnalyzer overall was computed.
-        overall = fuse_modality_scores(
+        fusion = fuse_modalities(
             {
                 "text": caption_evidence,
                 "visual": bundle.visual,
@@ -284,8 +285,8 @@ class MyUniSentimentPipeline:
             "Analyzed video activity_id=%s user_id=%s overall=%s score=%.3f warnings=%s",
             activity.activity_id,
             activity.user_id,
-            overall.label,
-            overall.score,
+            fusion.overall.label,
+            fusion.overall.score,
             len(bundle.warnings),
         )
 
@@ -302,13 +303,14 @@ class MyUniSentimentPipeline:
                 extra=activity.metadata,
             ),
             analysis=AnalysisBlock(
-                overall=overall,
+                overall=fusion.overall,
                 modalities=ModalityBundle(
                     text=caption_evidence,
                     visual=bundle.visual,
                     ocr=bundle.ocr,
                     speech=bundle.speech,
                 ),
+                fusion=fusion.diagnostics,
                 warnings=list(bundle.warnings),
                 ocr_text=bundle.ocr_text,
                 transcript=bundle.transcript,
