@@ -1,15 +1,90 @@
-"""Pydantic schemas for MyUni sentiment analysis POC outputs."""
+"""Pydantic schemas for MyUni sentiment analysis POC inputs and outputs."""
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 SentimentLabel = Literal["positive", "neutral", "negative"]
 ActivityType = Literal["text", "image", "video"]
+
+# Reserved for future MyUni semantics (post / comment / story). Not enforced yet.
+ContentKind = Literal["post", "comment", "story", "caption", "other"]
+
+BatchRecordStatus = Literal["processed", "invalid", "unsupported", "failed"]
+
+
+# ---------------------------------------------------------------------------
+# Activity input contract (batch / daily workflow)
+# ---------------------------------------------------------------------------
+
+
+class ActivityInput(BaseModel):
+    """Validated MyUni activity record for ingestion.
+
+    Batch validation policy (Milestone 2):
+    - ``activity_id`` and ``user_id`` are required non-blank strings
+    - ``text`` activities require usable (non-blank) ``text``
+    - ``image`` / ``video`` activities require ``media_path``; caption ``text`` is optional
+    - ``content_kind`` is optional reserved extensibility (post/comment/story), unused by MVP logic
+    """
+
+    activity_id: str = Field(..., min_length=1)
+    user_id: str = Field(..., min_length=1)
+    activity_type: ActivityType
+    text: Optional[str] = None
+    media_path: Optional[str] = None
+    created_at: datetime
+    metadata: Optional[dict[str, Any]] = None
+    content_kind: Optional[ContentKind] = Field(
+        default=None,
+        description="Optional future semantic kind (post/comment/story); ignored by MVP routing.",
+    )
+
+    @field_validator("activity_id", "user_id", mode="before")
+    @classmethod
+    def _strip_required_ids(cls, value: object) -> object:
+        if isinstance(value, str):
+            return value.strip()
+        return value
+
+    @field_validator("media_path", mode="before")
+    @classmethod
+    def _strip_optional_path(cls, value: object) -> object:
+        if isinstance(value, str):
+            stripped = value.strip()
+            return stripped or None
+        return value
+
+    @field_validator("text", mode="before")
+    @classmethod
+    def _normalize_optional_text(cls, value: object) -> object:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            stripped = value.strip()
+            return stripped or None
+        return value
+
+    @model_validator(mode="after")
+    def _enforce_modality_rules(self) -> ActivityInput:
+        if self.activity_type == "text":
+            if not self.text:
+                raise ValueError("text activities require non-blank text")
+        elif self.activity_type in ("image", "video"):
+            if not self.media_path:
+                raise ValueError(
+                    f"{self.activity_type} activities require media_path",
+                )
+        return self
+
+
+# ---------------------------------------------------------------------------
+# Analysis output (Milestone 1+)
+# ---------------------------------------------------------------------------
 
 
 class SentimentEvidence(BaseModel):
@@ -40,6 +115,10 @@ class AnalysisBlock(BaseModel):
 class InputMetadata(BaseModel):
     text_length: Optional[int] = None
     text_preview: Optional[str] = None
+    media_path: Optional[str] = None
+    created_at: Optional[datetime] = None
+    content_kind: Optional[ContentKind] = None
+    extra: Optional[dict[str, Any]] = None
 
 
 class ActivityAnalysisResult(BaseModel):
@@ -56,4 +135,47 @@ class ActivityAnalysisResult(BaseModel):
 
     def model_dump_json_compatible(self) -> dict[str, Any]:
         """Serialize with ISO timestamps for CLI / file output."""
+        return self.model_dump(mode="json")
+
+
+# ---------------------------------------------------------------------------
+# Batch processing outcomes
+# ---------------------------------------------------------------------------
+
+
+class BatchRecordOutcome(BaseModel):
+    """Per-record result for JSONL batch ingestion."""
+
+    line_number: int
+    status: BatchRecordStatus
+    activity_id: Optional[str] = None
+    user_id: Optional[str] = None
+    activity_type: Optional[str] = None
+    error: Optional[str] = None
+    note: Optional[str] = None
+    result: Optional[ActivityAnalysisResult] = None
+
+    def model_dump_json_compatible(self) -> dict[str, Any]:
+        return self.model_dump(mode="json")
+
+
+class BatchSummary(BaseModel):
+    """Aggregate metrics for a batch run."""
+
+    total: int = 0
+    valid: int = 0
+    invalid: int = 0
+    processed: int = 0
+    unsupported: int = 0
+    failed: int = 0
+
+
+class BatchProcessingResult(BaseModel):
+    """Full batch response: summary + per-record outcomes."""
+
+    source: str
+    summary: BatchSummary
+    records: list[BatchRecordOutcome]
+
+    def model_dump_json_compatible(self) -> dict[str, Any]:
         return self.model_dump(mode="json")
