@@ -170,20 +170,16 @@ def test_mixed_batch_continues_after_invalid_record() -> None:
     assert result.summary.total == 5
     assert result.summary.invalid == 1
     assert result.summary.valid == 4
-    assert result.summary.processed == 3  # 2 text + 1 image
-    assert result.summary.unsupported == 1  # video
+    assert result.summary.processed == 4  # 2 text + 1 image + 1 video
+    assert result.summary.unsupported == 0
     assert result.summary.failed == 0
     assert [r.status for r in result.records] == [
         "processed",
         "invalid",
         "processed",
-        "unsupported",
+        "processed",
         "processed",
     ]
-    unsupported = result.records[3]
-    assert unsupported.result is None
-    assert unsupported.note is not None
-    assert "not implemented" in unsupported.note.lower()
 
 
 def test_sample_jsonl_file_metrics_with_stub() -> None:
@@ -218,10 +214,10 @@ def test_sample_jsonl_file_metrics_with_stub() -> None:
             )
 
     result = BatchIngestor(pipeline=StubPipeline()).process_file(sample)
-    # 3 text + 1 image processed; 1 video unsupported; 1 invalid blank text
+    # 3 text + 1 image + 1 video processed; 1 invalid blank text
     assert result.summary.total == 6
-    assert result.summary.processed == 4
-    assert result.summary.unsupported == 1
+    assert result.summary.processed == 5
+    assert result.summary.unsupported == 0
     assert result.summary.invalid == 1
     assert result.summary.valid == 5
     assert result.summary.failed == 0

@@ -26,13 +26,37 @@ DEFAULT_WHISPER_COMPUTE_TYPE = "int8"
 # Assumed language for English-only MVP (also passed to Whisper).
 DEFAULT_ASR_LANGUAGE = "en"
 
+# Video frame sampling (MVP v1). Scene detection is intentionally not used.
+DEFAULT_VIDEO_SAMPLE_FPS = 1.0
+DEFAULT_VIDEO_MAX_FRAMES = 60
+# OCR at most this many frames (evenly spaced among extracted frames).
+DEFAULT_VIDEO_MAX_OCR_FRAMES = 8
+
+
+@dataclass(frozen=True)
+class VideoSamplingConfig:
+    """Configurable fixed-FPS frame sampling with pathological-count safeguards."""
+
+    fps: float = DEFAULT_VIDEO_SAMPLE_FPS
+    max_frames: int = DEFAULT_VIDEO_MAX_FRAMES
+    max_ocr_frames: int = DEFAULT_VIDEO_MAX_OCR_FRAMES
+
+    def effective_fps(self, duration_seconds: float) -> float:
+        """Return FPS that keeps expected frame count within ``max_frames``."""
+        if duration_seconds <= 0:
+            return self.fps
+        expected = duration_seconds * self.fps
+        if expected <= self.max_frames:
+            return self.fps
+        return max(self.max_frames / duration_seconds, 1e-6)
+
 
 @dataclass(frozen=True)
 class FusionConfig:
     """POC-only late fusion weights (not client business scoring).
 
-    Image overall score is a confidence-weighted average of available modality
-    scores (caption text, visual, OCR text). Missing modalities are skipped.
+    Overall score is a confidence-weighted average of available modality
+    scores. Missing modalities are skipped.
     Label is derived from the fused score with a small neutral band.
     """
 
@@ -41,9 +65,11 @@ class FusionConfig:
             "text": 1.0,  # caption
             "visual": 1.0,
             "ocr": 0.8,
+            "speech": 1.0,
         },
     )
     neutral_band: float = 0.15
 
 
 DEFAULT_FUSION = FusionConfig()
+DEFAULT_VIDEO_SAMPLING = VideoSamplingConfig()

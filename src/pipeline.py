@@ -6,10 +6,11 @@ import logging
 import uuid
 from typing import Optional
 
+from src.analyzers.audio import AudioAnalyzer
 from src.analyzers.image import ImageAnalyzer
 from src.analyzers.text import TextSentimentAnalyzer
-from src.analyzers.audio import AudioAnalyzer
-from src.config import DEFAULT_FUSION, FusionConfig
+from src.analyzers.video import VideoAnalyzer
+from src.config import DEFAULT_FUSION, DEFAULT_VIDEO_SAMPLING, FusionConfig, VideoSamplingConfig
 from src.fusion import fuse_modality_scores
 from src.schemas import (
     ActivityAnalysisResult,
@@ -28,9 +29,7 @@ _PREVIEW_LEN = 120
 class MyUniSentimentPipeline:
     """Routes activities through modality analyzers and returns standardized results.
 
-    Milestone 4: ``text`` and ``image`` activities are analyzed. The speech/audio
-    branch (``AudioAnalyzer`` / ``analyze_speech``) is available for future video
-    work; full video frame sampling + fusion is not wired yet.
+    Milestone 5: ``text``, ``image``, and ``video`` activities are analyzed.
     """
 
     def __init__(
@@ -38,19 +37,30 @@ class MyUniSentimentPipeline:
         text_analyzer: Optional[TextSentimentAnalyzer] = None,
         image_analyzer: Optional[ImageAnalyzer] = None,
         audio_analyzer: Optional[AudioAnalyzer] = None,
+        video_analyzer: Optional[VideoAnalyzer] = None,
         fusion_config: FusionConfig = DEFAULT_FUSION,
+        video_sampling: VideoSamplingConfig = DEFAULT_VIDEO_SAMPLING,
+        video_debug: bool = False,
     ) -> None:
         self._text_analyzer = text_analyzer or TextSentimentAnalyzer()
         self._image_analyzer = image_analyzer or ImageAnalyzer(
             text_analyzer=self._text_analyzer,
         )
-        # Ensure image OCR scoring shares the same lazy text model instance.
         self._image_analyzer.set_text_analyzer(self._text_analyzer)
         self._audio_analyzer = audio_analyzer or AudioAnalyzer(
             text_analyzer=self._text_analyzer,
         )
         self._audio_analyzer.set_text_analyzer(self._text_analyzer)
         self._fusion_config = fusion_config
+        self._video_analyzer = video_analyzer or VideoAnalyzer(
+            image_analyzer=self._image_analyzer,
+            audio_analyzer=self._audio_analyzer,
+            text_analyzer=self._text_analyzer,
+            sampling=video_sampling,
+            fusion_config=fusion_config,
+            debug=video_debug,
+        )
+        self._video_analyzer.set_text_analyzer(self._text_analyzer)
 
     @property
     def text_analyzer(self) -> TextSentimentAnalyzer:
@@ -64,8 +74,12 @@ class MyUniSentimentPipeline:
     def audio_analyzer(self) -> AudioAnalyzer:
         return self._audio_analyzer
 
+    @property
+    def video_analyzer(self) -> VideoAnalyzer:
+        return self._video_analyzer
+
     def analyze_speech(self, media_path: object) -> SpeechAnalysisResult:
-        """Run the speech branch on an audio/video media path (no video fusion)."""
+        """Run the speech branch on an audio/video media path."""
         return self._audio_analyzer.analyze(media_path)  # type: ignore[arg-type]
 
     def analyze_text(
@@ -89,10 +103,7 @@ class MyUniSentimentPipeline:
         )
 
     def analyze_activity(self, activity: ActivityInput) -> ActivityAnalysisResult:
-        """Analyze a validated ActivityInput (text or image).
-
-        Video activities are not fully implemented yet (see ``analyze_speech``).
-        """
+        """Analyze a validated ActivityInput (text, image, or video)."""
         if activity.activity_type == "text":
             assert activity.text is not None
             cleaned = self._text_analyzer.validate_text(activity.text)
@@ -108,6 +119,9 @@ class MyUniSentimentPipeline:
 
         if activity.activity_type == "image":
             return self._analyze_image_activity(activity)
+
+        if activity.activity_type == "video":
+            return self._analyze_video_activity(activity)
 
         raise NotImplementedError(
             f"activity_type={activity.activity_type!r} is not implemented yet",
@@ -157,7 +171,6 @@ class MyUniSentimentPipeline:
 
     def _analyze_image_activity(self, activity: ActivityInput) -> ActivityAnalysisResult:
         assert activity.media_path is not None
-        # Resolve relative paths from process CWD (typical CLI / batch usage).
         media_path = activity.media_path
 
         caption_evidence = None
@@ -223,5 +236,82 @@ class MyUniSentimentPipeline:
                 modalities=modalities,
                 warnings=list(image_evidence.warnings),
                 ocr_text=image_evidence.ocr_text,
+            ),
+        )
+
+    def _analyze_video_activity(self, activity: ActivityInput) -> ActivityAnalysisResult:
+        assert activity.media_path is not None
+        media_path = activity.media_path
+
+        caption_evidence = None
+        caption_preview = None
+        caption_length = None
+        if activity.text:
+            cleaned_caption = self._text_analyzer.validate_text(activity.text)
+            caption_evidence = self._text_analyzer.analyze(cleaned_caption)
+            caption_evidence = caption_evidence.model_copy(
+                update={
+                    "details": {
+                        **(caption_evidence.details or {}),
+                        "source": "caption",
+                    },
+                },
+            )
+            caption_length = len(cleaned_caption)
+            caption_preview = (
+                cleaned_caption
+                if len(cleaned_caption) <= _PREVIEW_LEN
+                else f"{cleaned_caption[:_PREVIEW_LEN]}..."
+            )
+
+        bundle = self._video_analyzer.analyze(
+            media_path,
+            caption_sentiment=caption_evidence,
+        )
+
+        # Re-fuse so caption is always included even if VideoAnalyzer overall was computed.
+        overall = fuse_modality_scores(
+            {
+                "text": caption_evidence,
+                "visual": bundle.visual,
+                "ocr": bundle.ocr,
+                "speech": bundle.speech,
+            },
+            config=self._fusion_config,
+        )
+
+        logger.info(
+            "Analyzed video activity_id=%s user_id=%s overall=%s score=%.3f warnings=%s",
+            activity.activity_id,
+            activity.user_id,
+            overall.label,
+            overall.score,
+            len(bundle.warnings),
+        )
+
+        return ActivityAnalysisResult(
+            activity_id=activity.activity_id,
+            user_id=activity.user_id,
+            activity_type="video",
+            input=InputMetadata(
+                text_length=caption_length,
+                text_preview=caption_preview,
+                media_path=media_path,
+                created_at=activity.created_at,
+                content_kind=activity.content_kind,
+                extra=activity.metadata,
+            ),
+            analysis=AnalysisBlock(
+                overall=overall,
+                modalities=ModalityBundle(
+                    text=caption_evidence,
+                    visual=bundle.visual,
+                    ocr=bundle.ocr,
+                    speech=bundle.speech,
+                ),
+                warnings=list(bundle.warnings),
+                ocr_text=bundle.ocr_text,
+                transcript=bundle.transcript,
+                video=bundle.diagnostics,
             ),
         )

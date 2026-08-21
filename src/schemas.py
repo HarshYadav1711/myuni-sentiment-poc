@@ -145,7 +145,39 @@ class AnalysisBlock(BaseModel):
     )
     transcript: Optional[str] = Field(
         default=None,
-        description="ASR transcript when available (speech branch / future video).",
+        description="ASR transcript when available (speech / video).",
+    )
+    video: Optional[VideoDiagnostics] = Field(
+        default=None,
+        description="Compact video sampling / processing diagnostics.",
+    )
+
+
+class VideoFrameDebug(BaseModel):
+    """Optional per-frame debug row (omitted from default JSON)."""
+
+    index: int
+    timestamp_seconds: Optional[float] = None
+    visual_label: Optional[SentimentLabel] = None
+    visual_score: Optional[float] = None
+    visual_confidence: Optional[float] = None
+    ocr_preview: Optional[str] = None
+    error: Optional[str] = None
+
+
+class VideoDiagnostics(BaseModel):
+    """Compact video-level processing diagnostics (default output stays small)."""
+
+    duration_seconds: Optional[float] = None
+    sampling_fps: float
+    frames_extracted: int = 0
+    frames_analyzed: int = 0
+    frame_timestamps: list[float] = Field(default_factory=list)
+    processing_seconds: Optional[float] = None
+    has_audio: Optional[bool] = None
+    frame_debug: Optional[list[VideoFrameDebug]] = Field(
+        default=None,
+        description="Present only when debug=True on the video analyzer.",
     )
 
 

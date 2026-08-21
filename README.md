@@ -2,130 +2,95 @@
 
 English-first proof of concept for analyzing social activity sentiment on MyUni.
 
-## Current status (Milestone 4)
+## Current status (Milestone 5)
 
 **Working today:**
-- End-to-end **English text** sentiment
-- Validated activity contract + **JSONL batch ingestion**
-- **Image** activities (SigLIP 2 visual + OCR + caption + POC fusion)
-- **Speech/audio branch** for future video: FFmpeg extraction + faster-whisper ASR + transcript sentiment (`AudioAnalyzer` / `pipeline.analyze_speech`)
+- **Text** sentiment (RoBERTa)
+- **Image** (SigLIP 2 visual + OCR + caption + POC fusion)
+- **Speech/audio** branch (FFmpeg + faster-whisper)
+- **Video** end-to-end: ~1 FPS frame sampling → visual aggregate + practical OCR + ASR/speech + optional caption → explainable late fusion
+- JSONL **batch** ingestion for text / image / video
 
-**Not wired yet:** full **video** activities (frame sampling + multimodal fusion). Batch still reports video as `unsupported`.
-
-**Not implemented yet:** SQLite storage, daily aggregation, Streamlit demo.
+**Not implemented yet:** scene detection, native video VLMs, SQLite storage, daily aggregation, Streamlit demo.
 
 ## Requirements
 
-- Python 3.10+ recommended
-- ~16 GB RAM; **CPU is supported**; GPU optional
-- First text/visual/ASR analysis downloads model weights (network once)
-- Optional: [Tesseract OCR](https://github.com/tesseract-ocr/tesseract) for image OCR
-- **Required for speech branch:** [FFmpeg](https://ffmpeg.org/) on `PATH`
+- Python 3.10+
+- ~16 GB RAM; CPU supported; GPU optional
+- **FFmpeg + ffprobe** on `PATH` (required for video/speech)
+- Optional: Tesseract OCR for embedded text
 
-## Setup (Windows-friendly)
+## Setup (Windows)
 
 ```powershell
 cd D:\Work\myuni-sentiment-poc
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
 pip install -r requirements.txt
+winget install Gyan.FFmpeg   # then reopen terminal; ffmpeg -version / ffprobe -version
 python scripts/generate_sample_image.py
+python scripts/generate_sample_video.py
 ```
 
-### FFmpeg (required for speech/audio extraction)
+## Analyze a video
 
-1. Install via winget: `winget install Gyan.FFmpeg`
-   - Or download a release build: https://www.gyan.dev/ffmpeg/builds/
-2. Ensure `ffmpeg.exe` is on `PATH`, then **open a new terminal**
-3. Verify: `ffmpeg -version`
-4. If FFmpeg is missing, `AudioAnalyzer` / `analyze_speech` raises an actionable `FFmpegNotFoundError` (does not invent transcripts)
+```powershell
+python main.py --video data/samples/synthetic_sample.mp4 --caption "Quiet campus clip" --user-id U005 --activity-id ACT005
 
-### Tesseract OCR (optional, Windows)
+# Include compact per-frame debug rows:
+python main.py --video data/samples/synthetic_sample.mp4 --video-debug
+```
 
-1. Install the UB Mannheim Windows build: https://github.com/UB-Mannheim/tesseract/wiki
-2. Ensure `tesseract.exe` is on `PATH`
-3. Verify: `tesseract --version`
-4. If missing, image analysis still returns visual (+ caption) evidence with an `OCR unavailable` warning
+Or via batch JSONL (`activity_type: "video"`).
+
+## Video strategy (MVP v1)
+
+- Fixed sampling at **~1 FPS** (configurable; auto-reduced to respect `max_frames=60`)
+- Per-frame visual scoring via existing SigLIP 2 zero-shot path
+- OCR on an evenly spaced subset of frames (`max_ocr_frames=8`)
+- Audio via existing `AudioAnalyzer` (graceful if no speech / no audio stream)
+- Visual summary = confidence-weighted average of frame scores (**not** a temporal neural model)
+- Overall = confidence-weighted late fusion of caption / visual / OCR / speech
+- Temp frames cleaned unless `preserve_temp=True` on `VideoAnalyzer`
+- Default JSON stays compact; `--video-debug` adds `analysis.video.frame_debug`
+
+Serious decode/probe failures still error; OCR/speech/single-frame failures become warnings with partial evidence.
 
 ## Models
 
-### Text
-
-`cardiffnlp/twitter-roberta-base-sentiment-latest` — lazy-loaded; score = `P(positive) - P(negative)`
-
-### Visual
-
-`google/siglip2-base-patch16-224` — zero-shot concept scoring (not a trained sentiment classifier)
-
-### Speech / ASR
-
-Default: **`base.en`** via **faster-whisper** (CPU, `int8` compute type). Configurable in `src/config.py` / `AudioAnalyzer(whisper_model=...)`.
-
-- Lazy model load
-- CUDA not required
-- Temporary extracted WAV files are cleaned up after each run
-- Empty / no-speech media → warning, **no fabricated transcript**, no speech sentiment
-
-## Speech branch API (Milestone 4)
-
-```python
-from src.pipeline import MyUniSentimentPipeline
-
-pipeline = MyUniSentimentPipeline()
-speech = pipeline.analyze_speech("path/to/clip.mp4")  # or .wav/.mp3/...
-print(speech.transcript, speech.sentiment, speech.warnings)
-```
-
-Returned fields include: transcript, language, segments (timestamps), transcription duration, audio duration when available, speech sentiment, ASR model id, warnings.
-
-## CLI
-
-```powershell
-# Single text
-python main.py "I really enjoyed today's workshop."
-
-# Batch (text + image processed; video still unsupported for full fusion)
-python main.py --batch data/samples/activities.jsonl
-```
+| Modality | Model / tool |
+| --- | --- |
+| Text / caption / OCR / transcript | `cardiffnlp/twitter-roberta-base-sentiment-latest` |
+| Visual | `google/siglip2-base-patch16-224` (zero-shot concepts) |
+| ASR | faster-whisper `base.en` (CPU `int8`) |
+| Media | FFmpeg / ffprobe |
 
 ## Tests
 
 ```powershell
-# Fast unit tests (no large model downloads for ASR)
+# Fast unit tests
 pytest -q -m "not integration"
 
-# Includes text + SigLIP smoke (still skips optional ASR integration)
+# Default suite (skips optional ASR/video integration)
 pytest -q
 
-# Optional ASR integration (downloads Whisper; needs FFmpeg)
-$env:MYUNI_RUN_ASR_INTEGRATION = "1"
-pytest -q -m asr_integration
+# Optional video smoke (downloads models; needs FFmpeg)
+$env:MYUNI_RUN_VIDEO_INTEGRATION = "1"
+pytest -q -m video_integration
 ```
-
-Speech unit tests cover: path validation, FFmpeg missing/failure handling, empty transcript behavior, standardized result shape, temp cleanup.
 
 ## Project layout
 
 ```text
-src/
-  analyzers/text.py
-  analyzers/visual.py
-  analyzers/ocr.py
-  analyzers/image.py
-  analyzers/audio.py      # FFmpeg + faster-whisper speech branch
-  media/ffmpeg_utils.py
-  batch.py
-  config.py
-  fusion.py
-  pipeline.py
-  schemas.py
+src/analyzers/{text,visual,ocr,image,audio,video}.py
+src/media/ffmpeg_utils.py
+src/{pipeline,batch,fusion,config,schemas}.py
 ```
 
 ## Current limitations
 
-- Full video frame sampling + multimodal fusion not implemented (speech branch only)
-- SigLIP prompts are heuristic zero-shot concepts
-- OCR quality depends on Tesseract + image clarity
-- ASR quality depends on audio clarity; English-only MVP (`base.en`)
-- No SQLite / aggregation / Streamlit yet
+- No scene/keyframe detection yet (fixed FPS only)
+- No large native video VLM
+- OCR/ASR quality depend on media clarity and installed binaries
+- English only
+- No SQLite / Streamlit yet

@@ -7,6 +7,7 @@ import argparse
 import json
 import logging
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 # Allow `python main.py ...` without installing the package.
@@ -16,11 +17,12 @@ if str(ROOT) not in sys.path:
 
 from src.batch import BatchIngestor
 from src.pipeline import MyUniSentimentPipeline
+from src.schemas import ActivityInput
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="MyUni sentiment POC — English text analysis and JSONL batch ingestion",
+        description="MyUni sentiment POC — text, image/video batch, and video analysis",
     )
     parser.add_argument(
         "text",
@@ -35,16 +37,33 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to a JSONL file of MyUni activities",
     )
     parser.add_argument(
+        "--video",
+        dest="video_path",
+        default=None,
+        help="Path to a local video file to analyze end-to-end",
+    )
+    parser.add_argument(
+        "--caption",
+        dest="caption",
+        default=None,
+        help="Optional caption text for --video mode",
+    )
+    parser.add_argument(
+        "--video-debug",
+        action="store_true",
+        help="Include per-frame debug rows in video diagnostics",
+    )
+    parser.add_argument(
         "--user-id",
         dest="user_id",
         default=None,
-        help="Optional user identifier for single-text mode (e.g. U007)",
+        help="Optional user identifier (e.g. U007)",
     )
     parser.add_argument(
         "--activity-id",
         dest="activity_id",
         default=None,
-        help="Optional activity identifier for single-text mode (e.g. ACT0042)",
+        help="Optional activity identifier (e.g. ACT0042)",
     )
     parser.add_argument(
         "--log-level",
@@ -56,7 +75,6 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _configure_stdio() -> None:
-    # Prefer UTF-8 on Windows so social-media emoji text prints cleanly.
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     if hasattr(sys.stderr, "reconfigure"):
@@ -74,14 +92,24 @@ def main(argv: list[str] | None = None) -> int:
         format="%(levelname)s %(name)s: %(message)s",
     )
 
-    if args.batch_path and args.text:
-        parser.error("Provide either a text argument or --batch, not both")
+    modes = [bool(args.batch_path), bool(args.video_path), bool(args.text)]
+    if sum(modes) > 1:
+        parser.error("Provide only one of: text argument, --batch, or --video")
 
     if args.batch_path:
         return _run_batch(args.batch_path)
 
+    if args.video_path:
+        return _run_video(
+            args.video_path,
+            caption=args.caption,
+            user_id=args.user_id,
+            activity_id=args.activity_id,
+            video_debug=args.video_debug,
+        )
+
     if args.text is None:
-        parser.error("Provide text to analyze, or use --batch PATH")
+        parser.error("Provide text to analyze, or use --batch PATH / --video PATH")
 
     return _run_single_text(args.text, args.user_id, args.activity_id)
 
@@ -106,6 +134,36 @@ def _run_single_text(
     return 0
 
 
+def _run_video(
+    video_path: str,
+    *,
+    caption: str | None,
+    user_id: str | None,
+    activity_id: str | None,
+    video_debug: bool,
+) -> int:
+    pipeline = MyUniSentimentPipeline(video_debug=video_debug)
+    activity = ActivityInput(
+        activity_id=activity_id or "ACT-VIDEO",
+        user_id=user_id or "U-VIDEO",
+        activity_type="video",
+        text=caption,
+        media_path=video_path,
+        created_at=datetime.now(timezone.utc),
+    )
+    try:
+        result = pipeline.analyze_activity(activity)
+    except FileNotFoundError as exc:
+        print(f"Input error: {exc}", file=sys.stderr)
+        return 2
+    except Exception as exc:  # noqa: BLE001
+        print(f"Video analysis error: {exc}", file=sys.stderr)
+        return 1
+
+    print(json.dumps(result.model_dump_json_compatible(), indent=2, ensure_ascii=False))
+    return 0
+
+
 def _run_batch(batch_path: str) -> int:
     ingestor = BatchIngestor()
     try:
@@ -117,7 +175,6 @@ def _run_batch(batch_path: str) -> int:
     print(json.dumps(result.model_dump_json_compatible(), indent=2, ensure_ascii=False))
 
     summary = result.summary
-    # Non-zero when nothing useful was processed and there were problems.
     if summary.processed == 0 and (summary.invalid > 0 or summary.failed > 0):
         return 1
     if summary.failed > 0:

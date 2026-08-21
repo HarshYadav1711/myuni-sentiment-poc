@@ -21,13 +21,6 @@ logger = logging.getLogger(__name__)
 
 PathLike = Union[str, Path]
 
-UNSUPPORTED_NOTE = (
-    "Video activity recognized, but full video processing (frame sampling + "
-    "multimodal fusion) is not implemented yet (Milestone 4 provides the speech "
-    "branch via AudioAnalyzer / pipeline.analyze_speech only). No video sentiment "
-    "was produced."
-)
-
 
 def _format_validation_error(exc: ValidationError) -> str:
     parts: list[str] = []
@@ -167,16 +160,6 @@ class BatchIngestor:
                 user_id=user_hint,
                 activity_type=type_hint,
                 error=str(exc),
-            )
-
-        if activity.activity_type == "video":
-            return BatchRecordOutcome(
-                line_number=line_number,
-                status="unsupported",
-                activity_id=activity.activity_id,
-                user_id=activity.user_id,
-                activity_type=activity.activity_type,
-                note=UNSUPPORTED_NOTE,
             )
 
         try:
