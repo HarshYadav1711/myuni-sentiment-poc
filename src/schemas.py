@@ -102,14 +102,22 @@ class SentimentEvidence(BaseModel):
 
 
 class ModalityBundle(BaseModel):
-    """Per-modality evidence. Unused modalities are omitted."""
+    """Per-modality evidence. Unused modalities are omitted (not null-filled)."""
 
-    text: Optional[SentimentEvidence] = None
+    text: Optional[SentimentEvidence] = None  # caption / primary text
+    visual: Optional[SentimentEvidence] = None
+    ocr: Optional[SentimentEvidence] = None
+    # speech reserved for video milestone
 
 
 class AnalysisBlock(BaseModel):
     overall: SentimentEvidence
     modalities: ModalityBundle
+    warnings: list[str] = Field(default_factory=list)
+    ocr_text: Optional[str] = Field(
+        default=None,
+        description="Normalized OCR string when extracted (may exist without ocr sentiment).",
+    )
 
 
 class InputMetadata(BaseModel):

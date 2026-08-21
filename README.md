@@ -2,23 +2,27 @@
 
 English-first proof of concept for analyzing social activity sentiment on MyUni.
 
-## Current status (Milestone 2)
+## Current status (Milestone 3)
 
 **Working today:**
-- End-to-end **English text** sentiment via a shared pipeline
-- Validated **activity contract** (`text` / `image` / `video`)
-- **JSONL batch ingestion** with per-record errors and summary metrics
+- End-to-end **English text** sentiment
+- Validated activity contract + **JSONL batch ingestion**
+- **Image** activities with:
+  - zero-shot **visual** sentiment (SigLIP 2)
+  - **OCR** text extraction + OCR text sentiment (when Tesseract is available)
+  - optional **caption** text sentiment kept as a separate modality
+  - simple explainable **POC fusion** into `analysis.overall`
 
-**Recognized but not analyzed yet:** image and video activities (reported as `unsupported`, no fake sentiment).
+**Recognized but not analyzed yet:** video (reported as `unsupported`).
 
-**Not implemented yet:** image/OCR/audio/video models, SQLite storage, daily aggregation, Streamlit demo.
+**Not implemented yet:** video/audio/ASR, SQLite storage, daily aggregation, Streamlit demo.
 
 ## Requirements
 
-- Python 3.10+ recommended (3.9+ should work)
-- ~16 GB RAM machine is fine; **CPU is supported**
-- GPU (CUDA) is optional — used automatically when available, never required
-- First text analysis downloads Hugging Face model weights (network required once)
+- Python 3.10+ recommended
+- ~16 GB RAM; **CPU is supported**; GPU optional
+- First text/visual analysis downloads Hugging Face weights (network once)
+- Optional: [Tesseract OCR](https://github.com/tesseract-ocr/tesseract) binary for OCR (pipeline continues without it)
 
 ## Setup (Windows-friendly)
 
@@ -28,107 +32,108 @@ python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
 pip install -r requirements.txt
+python scripts/generate_sample_image.py
 ```
 
-## Model
+### Tesseract OCR (optional, Windows)
 
-Text classifier:
+1. Install the UB Mannheim Windows build: https://github.com/UB-Mannheim/tesseract/wiki
+2. Ensure `tesseract.exe` is on `PATH` (installer option), or set:
+   ```powershell
+   $env:TESSDATA_PREFIX = "C:\Program Files\Tesseract-OCR\tessdata"
+   ```
+3. Verify: `tesseract --version`
+4. If Tesseract is missing, image analysis still returns visual (+ caption) evidence and a clear `OCR unavailable` warning — it does **not** crash the pipeline.
+
+## Models
+
+### Text
 
 `cardiffnlp/twitter-roberta-base-sentiment-latest`
 
-- Loaded **lazily** on first text analysis (not at import / process start)
-- Labels: `positive` | `neutral` | `negative`
-- POC score: `positive_probability - negative_probability` ≈ `[-1, +1]`
-- This score is **not** the future client business scoring methodology
+- Lazy-loaded; score = `P(positive) - P(negative)` ≈ `[-1, +1]`
+
+### Visual (zero-shot, not a trained sentiment classifier)
+
+Exact checkpoint: **`google/siglip2-base-patch16-224`**
+
+Candidate concept prompts (configurable in `src/config.py`):
+
+- positive → `"a positive and pleasant situation"`
+- neutral → `"a neutral everyday situation"`
+- negative → `"a negative or unpleasant situation"`
+
+Probabilities are a softmax over the three concept logits. Raw SigLIP sigmoid similarities are preserved under `details.raw_similarities`.
+
+### OCR
+
+`pytesseract` + system Tesseract. Meaningful OCR text is scored with the same text model; OCR evidence stays separate from caption (`modalities.text`) and visual (`modalities.visual`).
+
+## Image overall fusion (POC-only)
+
+Documented in `src/fusion.py` / `src/config.py`:
+
+- confidence-weighted average of available modality scores (`text` caption, `visual`, `ocr`)
+- label from fused score vs a small neutral band
+- **Not** the future client business scoring methodology
 
 ## Activity contract (batch)
 
-Each JSONL line is one activity object:
-
 | Field | Rule |
 | --- | --- |
-| `activity_id` | Required non-blank |
-| `user_id` | Required non-blank |
+| `activity_id` / `user_id` | Required non-blank |
 | `activity_type` | `text` \| `image` \| `video` |
-| `text` | Required non-blank for `text`; optional caption for `image`/`video` |
+| `text` | Required for `text`; optional caption for `image`/`video` |
 | `media_path` | Required for `image`/`video` |
-| `created_at` | Required ISO-8601 timestamp |
-| `metadata` | Optional object |
-| `content_kind` | Optional reserved (`post`/`comment`/`story`/…); ignored by MVP routing |
-
-Example:
-
-```json
-{"activity_id":"ACT001","user_id":"U001","activity_type":"text","text":"I loved today's event.","created_at":"2026-08-21T10:00:00+05:30"}
-```
+| `created_at` | Required ISO-8601 |
+| `metadata` / `content_kind` | Optional |
 
 ## CLI
 
-### Single text (Milestone 1, still supported)
-
 ```powershell
+# Single text
 python main.py "I really enjoyed today's workshop."
 
-python main.py "This was terrible." --user-id U007 --activity-id ACT0042
-```
-
-Blank / non-string input exits with code `2`.
-
-### JSONL batch (Milestone 2)
-
-```powershell
+# Batch (text + image processed; video unsupported)
 python main.py --batch data/samples/activities.jsonl
 ```
 
-Batch behavior:
-1. Read each non-empty line independently
-2. Validate against the activity contract
-3. Process valid **text** activities with the real text analyzer
-4. Mark valid **image**/**video** as `unsupported` (no fake scores)
-5. Keep going after bad records
-6. Emit per-record outcomes plus summary metrics:
-   `total`, `valid`, `invalid`, `processed`, `unsupported`, `failed`
+Sample image (synthetic, generated locally — not a copyrighted asset):
 
-Exit code `1` if any `failed` records, or if nothing was processed while invalid/failed records exist.
+`data/samples/synthetic_sample.png` via `python scripts/generate_sample_image.py`
 
 ## Tests
 
-Fast tests (no model download for most cases):
-
 ```powershell
-pytest tests/test_validation_unit.py tests/test_batch.py -q -m "not integration"
-```
+# Fast (skips real HF visual download)
+pytest -q -m "not integration"
 
-Full suite (includes real text inference):
-
-```powershell
+# Full (includes text + SigLIP smoke)
 pytest -q
 ```
 
-## Ambiguous social-media smoke script
-
-```powershell
-python scripts/smoke_ambiguous.py
-```
+Image unit tests cover: openable sample, missing path, corrupt file, OCR unavailable, OCR empty, caption independence, schema shape. They do **not** assert brittle ML probabilities.
 
 ## Project layout
 
 ```text
 src/
-  analyzers/text.py   # RoBERTa text analyzer
-  batch.py            # JSONL ingestion + metrics
-  pipeline.py         # MyUniSentimentPipeline
-  schemas.py          # ActivityInput + result models
-tests/
-data/samples/activities.jsonl
-main.py
+  analyzers/text.py
+  analyzers/visual.py
+  analyzers/ocr.py
+  analyzers/image.py
+  batch.py
+  config.py
+  fusion.py
+  pipeline.py
+  schemas.py
 ```
 
 ## Current limitations
 
-- Only text activities produce sentiment
-- Image/video are validated and acknowledged, not analyzed
-- English only (no Hindi / Hinglish)
-- No SQLite persistence or user-level daily aggregation
-- No Streamlit UI
-- First text inference is slower due to model download + load
+- Video/audio not implemented
+- SigLIP prompts are heuristic zero-shot concepts, not supervised sentiment labels
+- OCR quality depends on image clarity and Tesseract install
+- English only
+- No SQLite / aggregation / Streamlit yet
+- First visual load downloads ~weights and uses additional RAM alongside the text model

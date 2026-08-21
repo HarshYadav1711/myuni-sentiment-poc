@@ -126,13 +126,19 @@ def test_mixed_batch_continues_after_invalid_record() -> None:
             "activity_id": "ACT-IMG",
             "user_id": "U8",
             "activity_type": "image",
-            "media_path": "data/samples/placeholder_image.jpg",
+            "media_path": "data/samples/synthetic_sample.png",
             "created_at": "2026-08-21T11:00:00+05:30",
+        },
+        {
+            "activity_id": "ACT-VID",
+            "user_id": "U7",
+            "activity_type": "video",
+            "media_path": "data/samples/placeholder_video.mp4",
+            "created_at": "2026-08-21T12:00:00+05:30",
         },
         _text_record(activity_id="ACT-OK-2", text="This was awful."),
     ]
 
-    # Avoid loading the real model: stub the text analyzer path via a fake pipeline method.
     class StubPipeline(MyUniSentimentPipeline):
         def analyze_activity(self, activity):  # type: ignore[no-untyped-def]
             from src.schemas import (
@@ -144,37 +150,37 @@ def test_mixed_batch_continues_after_invalid_record() -> None:
             )
 
             evidence = SentimentEvidence(
-                label="positive" if "Great" in (activity.text or "") else "negative",
-                score=0.5 if "Great" in (activity.text or "") else -0.5,
+                label="positive",
+                score=0.5,
                 confidence=0.9,
                 model="stub",
             )
             return ActivityAnalysisResult(
                 activity_id=activity.activity_id,
                 user_id=activity.user_id,
-                activity_type="text",
-                input=InputMetadata(text_preview=activity.text),
+                activity_type=activity.activity_type,
+                input=InputMetadata(text_preview=activity.text, media_path=activity.media_path),
                 analysis=AnalysisBlock(
                     overall=evidence,
-                    modalities=ModalityBundle(text=evidence),
+                    modalities=ModalityBundle(text=evidence if activity.activity_type == "text" else None),
                 ),
             )
 
     result = BatchIngestor(pipeline=StubPipeline()).process_records(records)
-    assert result.summary.total == 4
+    assert result.summary.total == 5
     assert result.summary.invalid == 1
-    assert result.summary.valid == 3
-    assert result.summary.processed == 2
-    assert result.summary.unsupported == 1
+    assert result.summary.valid == 4
+    assert result.summary.processed == 3  # 2 text + 1 image
+    assert result.summary.unsupported == 1  # video
     assert result.summary.failed == 0
     assert [r.status for r in result.records] == [
         "processed",
         "invalid",
+        "processed",
         "unsupported",
         "processed",
     ]
-    # Unsupported must not invent sentiment
-    unsupported = result.records[2]
+    unsupported = result.records[3]
     assert unsupported.result is None
     assert unsupported.note is not None
     assert "not implemented" in unsupported.note.lower()
@@ -203,19 +209,19 @@ def test_sample_jsonl_file_metrics_with_stub() -> None:
             return ActivityAnalysisResult(
                 activity_id=activity.activity_id,
                 user_id=activity.user_id,
-                activity_type="text",
-                input=InputMetadata(text_preview=activity.text),
+                activity_type=activity.activity_type,
+                input=InputMetadata(text_preview=activity.text, media_path=activity.media_path),
                 analysis=AnalysisBlock(
                     overall=evidence,
-                    modalities=ModalityBundle(text=evidence),
+                    modalities=ModalityBundle(text=evidence if activity.activity_type == "text" else None),
                 ),
             )
 
     result = BatchIngestor(pipeline=StubPipeline()).process_file(sample)
-    # 3 valid text + 2 unsupported media + 1 invalid blank text = 6
+    # 3 text + 1 image processed; 1 video unsupported; 1 invalid blank text
     assert result.summary.total == 6
-    assert result.summary.processed == 3
-    assert result.summary.unsupported == 2
+    assert result.summary.processed == 4
+    assert result.summary.unsupported == 1
     assert result.summary.invalid == 1
     assert result.summary.valid == 5
     assert result.summary.failed == 0

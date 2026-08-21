@@ -22,8 +22,8 @@ logger = logging.getLogger(__name__)
 PathLike = Union[str, Path]
 
 UNSUPPORTED_NOTE = (
-    "Activity type recognized but multimodal inference is not implemented yet "
-    "(Milestone 2). No sentiment was produced."
+    "Activity type recognized but video/audio inference is not implemented yet "
+    "(Milestone 3). No sentiment was produced."
 )
 
 
@@ -167,7 +167,7 @@ class BatchIngestor:
                 error=str(exc),
             )
 
-        if activity.activity_type in ("image", "video"):
+        if activity.activity_type == "video":
             return BatchRecordOutcome(
                 line_number=line_number,
                 status="unsupported",

@@ -6,7 +6,10 @@ import logging
 import uuid
 from typing import Optional
 
+from src.analyzers.image import ImageAnalyzer
 from src.analyzers.text import TextSentimentAnalyzer
+from src.config import DEFAULT_FUSION, FusionConfig
+from src.fusion import fuse_modality_scores
 from src.schemas import (
     ActivityAnalysisResult,
     ActivityInput,
@@ -23,16 +26,31 @@ _PREVIEW_LEN = 120
 class MyUniSentimentPipeline:
     """Routes activities through modality analyzers and returns standardized results.
 
-    Milestone 2: text activities are fully analyzed; image/video are rejected here
-    as unsupported (batch layer reports them without fake sentiment).
+    Milestone 3: ``text`` and ``image`` activities are analyzed; ``video`` remains
+    unimplemented at the analyzer layer (batch reports unsupported).
     """
 
-    def __init__(self, text_analyzer: Optional[TextSentimentAnalyzer] = None) -> None:
+    def __init__(
+        self,
+        text_analyzer: Optional[TextSentimentAnalyzer] = None,
+        image_analyzer: Optional[ImageAnalyzer] = None,
+        fusion_config: FusionConfig = DEFAULT_FUSION,
+    ) -> None:
         self._text_analyzer = text_analyzer or TextSentimentAnalyzer()
+        self._image_analyzer = image_analyzer or ImageAnalyzer(
+            text_analyzer=self._text_analyzer,
+        )
+        # Ensure image OCR scoring shares the same lazy text model instance.
+        self._image_analyzer.set_text_analyzer(self._text_analyzer)
+        self._fusion_config = fusion_config
 
     @property
     def text_analyzer(self) -> TextSentimentAnalyzer:
         return self._text_analyzer
+
+    @property
+    def image_analyzer(self) -> ImageAnalyzer:
+        return self._image_analyzer
 
     def analyze_text(
         self,
@@ -55,25 +73,25 @@ class MyUniSentimentPipeline:
         )
 
     def analyze_activity(self, activity: ActivityInput) -> ActivityAnalysisResult:
-        """Analyze a validated ActivityInput.
-
-        Only ``text`` activities are implemented in Milestone 2.
-        """
-        if activity.activity_type != "text":
-            raise NotImplementedError(
-                f"activity_type={activity.activity_type!r} is not implemented yet",
+        """Analyze a validated ActivityInput (text or image)."""
+        if activity.activity_type == "text":
+            assert activity.text is not None
+            cleaned = self._text_analyzer.validate_text(activity.text)
+            return self._analyze_text_content(
+                cleaned,
+                activity_id=activity.activity_id,
+                user_id=activity.user_id,
+                created_at=activity.created_at,
+                content_kind=activity.content_kind,
+                extra=activity.metadata,
+                media_path=activity.media_path,
             )
 
-        assert activity.text is not None  # enforced by ActivityInput
-        cleaned = self._text_analyzer.validate_text(activity.text)
-        return self._analyze_text_content(
-            cleaned,
-            activity_id=activity.activity_id,
-            user_id=activity.user_id,
-            created_at=activity.created_at,
-            content_kind=activity.content_kind,
-            extra=activity.metadata,
-            media_path=activity.media_path,
+        if activity.activity_type == "image":
+            return self._analyze_image_activity(activity)
+
+        raise NotImplementedError(
+            f"activity_type={activity.activity_type!r} is not implemented yet",
         )
 
     def _analyze_text_content(
@@ -115,5 +133,76 @@ class MyUniSentimentPipeline:
                     update={"details": {"source_modality": "text"}},
                 ),
                 modalities=ModalityBundle(text=evidence),
+            ),
+        )
+
+    def _analyze_image_activity(self, activity: ActivityInput) -> ActivityAnalysisResult:
+        assert activity.media_path is not None
+        # Resolve relative paths from process CWD (typical CLI / batch usage).
+        media_path = activity.media_path
+
+        caption_evidence = None
+        caption_preview = None
+        caption_length = None
+        if activity.text:
+            cleaned_caption = self._text_analyzer.validate_text(activity.text)
+            caption_evidence = self._text_analyzer.analyze(cleaned_caption)
+            caption_evidence = caption_evidence.model_copy(
+                update={
+                    "details": {
+                        **(caption_evidence.details or {}),
+                        "source": "caption",
+                    },
+                },
+            )
+            caption_length = len(cleaned_caption)
+            caption_preview = (
+                cleaned_caption
+                if len(cleaned_caption) <= _PREVIEW_LEN
+                else f"{cleaned_caption[:_PREVIEW_LEN]}..."
+            )
+
+        image_evidence = self._image_analyzer.analyze_path(media_path)
+
+        modalities = ModalityBundle(
+            text=caption_evidence,
+            visual=image_evidence.visual,
+            ocr=image_evidence.ocr_sentiment,
+        )
+        overall = fuse_modality_scores(
+            {
+                "text": caption_evidence,
+                "visual": image_evidence.visual,
+                "ocr": image_evidence.ocr_sentiment,
+            },
+            config=self._fusion_config,
+        )
+
+        logger.info(
+            "Analyzed image activity_id=%s user_id=%s overall=%s score=%.3f warnings=%s",
+            activity.activity_id,
+            activity.user_id,
+            overall.label,
+            overall.score,
+            len(image_evidence.warnings),
+        )
+
+        return ActivityAnalysisResult(
+            activity_id=activity.activity_id,
+            user_id=activity.user_id,
+            activity_type="image",
+            input=InputMetadata(
+                text_length=caption_length,
+                text_preview=caption_preview,
+                media_path=media_path,
+                created_at=activity.created_at,
+                content_kind=activity.content_kind,
+                extra=activity.metadata,
+            ),
+            analysis=AnalysisBlock(
+                overall=overall,
+                modalities=modalities,
+                warnings=list(image_evidence.warnings),
+                ocr_text=image_evidence.ocr_text,
             ),
         )
