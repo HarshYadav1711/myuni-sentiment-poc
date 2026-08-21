@@ -14,7 +14,7 @@ ActivityType = Literal["text", "image", "video"]
 # Reserved for future MyUni semantics (post / comment / story). Not enforced yet.
 ContentKind = Literal["post", "comment", "story", "caption", "other"]
 
-BatchRecordStatus = Literal["processed", "invalid", "unsupported", "failed"]
+BatchRecordStatus = Literal["processed", "invalid", "unsupported", "failed", "skipped"]
 
 
 # ---------------------------------------------------------------------------
@@ -252,6 +252,7 @@ class BatchSummary(BaseModel):
     processed: int = 0
     unsupported: int = 0
     failed: int = 0
+    skipped: int = 0
 
 
 class BatchProcessingResult(BaseModel):
@@ -260,6 +261,29 @@ class BatchProcessingResult(BaseModel):
     source: str
     summary: BatchSummary
     records: list[BatchRecordOutcome]
+    batch_id: Optional[str] = None
+
+    def model_dump_json_compatible(self) -> dict[str, Any]:
+        return self.model_dump(mode="json")
+
+
+class DailyUserScore(BaseModel):
+    """POC daily user-level sentiment aggregate — NOT the client business score."""
+
+    user_id: str
+    score_date: str
+    activity_count: int = 0
+    valid_analysis_count: int = 0
+    mean_sentiment_score: Optional[float] = None
+    positive_count: int = 0
+    neutral_count: int = 0
+    negative_count: int = 0
+    daily_sentiment_label: Optional[SentimentLabel] = None
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    note: str = (
+        "POC daily aggregate — mean of stored activity sentiment scores; "
+        "NOT the future client business score"
+    )
 
     def model_dump_json_compatible(self) -> dict[str, Any]:
         return self.model_dump(mode="json")

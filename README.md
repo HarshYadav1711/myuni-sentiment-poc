@@ -2,15 +2,15 @@
 
 English-first proof of concept for analyzing social activity sentiment on MyUni.
 
-## Current status (Milestone 6)
+## Current status (Milestone 7)
 
 **Working today:**
-- **Text** / **image** / **video** multimodal analysis
-- Explainable **late fusion** with editable `config/fusion.yaml` (POC defaults only)
-- Conflict detection that lowers overall confidence when modalities disagree
+- Text / image / video multimodal analysis + explainable late fusion
 - JSONL batch ingestion
+- **SQLite persistence** (`batch_runs`, `activities`, `analysis_results`, `daily_user_scores`)
+- **POC daily user aggregates** (not the client business score)
 
-**Not implemented yet:** scene detection, native video VLMs, SQLite storage, daily aggregation, Streamlit demo.
+**Not implemented yet:** scene detection, native video VLMs, PostgreSQL, Streamlit demo.
 
 ## Requirements
 
@@ -55,6 +55,29 @@ Or via batch JSONL (`activity_type: "video"`).
 
 Serious decode/probe failures still error; OCR/speech/single-frame failures become warnings with partial evidence.
 
+## SQLite persistence & daily aggregates (Milestone 7)
+
+Local-only SQLite (stdlib `sqlite3`). No PostgreSQL in this POC.
+
+```powershell
+# Process JSONL into SQLite and print a concise batch summary
+python main.py --batch data/samples/activities.jsonl --db data/myuni_poc.db
+
+# Query POC daily user scores (NOT client business scores)
+python main.py --daily-scores --db data/myuni_poc.db
+python main.py --daily-scores --db data/myuni_poc.db --date 2026-08-21
+python main.py --daily-scores --db data/myuni_poc.db --user-id U001
+```
+
+Tables: `batch_runs`, `activities`, `analysis_results`, `daily_user_scores`.
+
+- `activity_id` is unique — reruns **skip** duplicates (no silent overwrite)
+- Failed records are stored with `status=failed` and do not erase successes
+- Daily fields: `activity_count`, `valid_analysis_count`, `mean_sentiment_score`, pos/neu/neg counts, `daily_sentiment_label`
+- Documented as **POC daily aggregate**, not future client scoring
+
+Without `--db`, `--batch` still runs analysis-only (in-memory summary JSON).
+
 ## Multimodal fusion (Milestone 6)
 
 Transparent **late fusion** (no LLM explanations). Editable POC defaults:
@@ -98,13 +121,16 @@ pytest -q -m video_integration
 ```text
 src/analyzers/{text,visual,ocr,image,audio,video}.py
 src/media/ffmpeg_utils.py
+src/storage/{schema,repository,aggregation,service}.py
 src/{pipeline,batch,fusion,config,schemas}.py
+config/fusion.yaml
 ```
 
 ## Current limitations
 
 - No scene/keyframe detection yet (fixed FPS only)
 - No large native video VLM
+- Daily aggregates are POC means/counts — not client business scores
 - OCR/ASR quality depend on media clarity and installed binaries
 - English only
-- No SQLite / Streamlit yet
+- No Streamlit UI yet

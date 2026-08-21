@@ -54,6 +54,11 @@ htmlcov/
 outputs/*
 !outputs/.gitkeep
 
+# Local SQLite POC databases
+*.db
+*.sqlite
+*.sqlite3
+
 # OS
 .DS_Store
 Thumbs.db

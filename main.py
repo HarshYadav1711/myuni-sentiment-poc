@@ -18,11 +18,13 @@ if str(ROOT) not in sys.path:
 from src.batch import BatchIngestor
 from src.pipeline import MyUniSentimentPipeline
 from src.schemas import ActivityInput
+from src.storage.repository import SentimentRepository
+from src.storage.service import PersistentBatchRunner
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="MyUni sentiment POC — text, image/video batch, and video analysis",
+        description="MyUni sentiment POC — analysis, batch, SQLite persistence",
     )
     parser.add_argument(
         "text",
@@ -35,6 +37,23 @@ def build_parser() -> argparse.ArgumentParser:
         dest="batch_path",
         default=None,
         help="Path to a JSONL file of MyUni activities",
+    )
+    parser.add_argument(
+        "--db",
+        dest="db_path",
+        default=None,
+        help="SQLite database path (with --batch persists results; with --daily-scores queries)",
+    )
+    parser.add_argument(
+        "--daily-scores",
+        action="store_true",
+        help="Print POC daily user sentiment aggregates from SQLite (--db required)",
+    )
+    parser.add_argument(
+        "--date",
+        dest="score_date",
+        default=None,
+        help="Filter daily scores by UTC date YYYY-MM-DD",
     )
     parser.add_argument(
         "--video",
@@ -92,12 +111,21 @@ def main(argv: list[str] | None = None) -> int:
         format="%(levelname)s %(name)s: %(message)s",
     )
 
+    if args.daily_scores:
+        if not args.db_path:
+            parser.error("--daily-scores requires --db PATH")
+        return _run_daily_scores(
+            args.db_path,
+            score_date=args.score_date,
+            user_id=args.user_id,
+        )
+
     modes = [bool(args.batch_path), bool(args.video_path), bool(args.text)]
     if sum(modes) > 1:
         parser.error("Provide only one of: text argument, --batch, or --video")
 
     if args.batch_path:
-        return _run_batch(args.batch_path)
+        return _run_batch(args.batch_path, db_path=args.db_path)
 
     if args.video_path:
         return _run_video(
@@ -109,7 +137,9 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     if args.text is None:
-        parser.error("Provide text to analyze, or use --batch PATH / --video PATH")
+        parser.error(
+            "Provide text, --batch PATH, --video PATH, or --daily-scores --db PATH",
+        )
 
     return _run_single_text(args.text, args.user_id, args.activity_id)
 
@@ -164,21 +194,50 @@ def _run_video(
     return 0
 
 
-def _run_batch(batch_path: str) -> int:
-    ingestor = BatchIngestor()
+def _run_batch(batch_path: str, *, db_path: str | None) -> int:
     try:
-        result = ingestor.process_file(batch_path)
+        if db_path:
+            result = PersistentBatchRunner(db_path).process_file(batch_path)
+        else:
+            result = BatchIngestor().process_file(batch_path)
     except FileNotFoundError as exc:
         print(f"Input error: {exc}", file=sys.stderr)
         return 2
 
-    print(json.dumps(result.model_dump_json_compatible(), indent=2, ensure_ascii=False))
-
     summary = result.summary
+    concise = {
+        "batch_id": result.batch_id,
+        "source": result.source,
+        "summary": summary.model_dump(),
+        "db": db_path,
+    }
+    if db_path:
+        print(json.dumps(concise, indent=2, ensure_ascii=False))
+    else:
+        print(json.dumps(result.model_dump_json_compatible(), indent=2, ensure_ascii=False))
+
     if summary.processed == 0 and (summary.invalid > 0 or summary.failed > 0):
         return 1
     if summary.failed > 0:
         return 1
+    return 0
+
+
+def _run_daily_scores(
+    db_path: str,
+    *,
+    score_date: str | None,
+    user_id: str | None,
+) -> int:
+    repo = SentimentRepository(db_path)
+    rows = repo.get_daily_scores(score_date=score_date, user_id=user_id)
+    payload = {
+        "note": "POC daily aggregates — NOT the client business score",
+        "filter": {"date": score_date, "user_id": user_id},
+        "count": len(rows),
+        "scores": [r.model_dump_json_compatible() for r in rows],
+    }
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
     return 0
 
 
