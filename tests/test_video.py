@@ -82,7 +82,7 @@ def test_partial_modality_failure_still_returns_structure(tmp_path: Path) -> Non
     probe = VideoProbeInfo(duration_seconds=2.0, has_video=True, has_audio=True)
 
     with patch("src.analyzers.video.probe_video", return_value=probe), patch(
-        "src.analyzers.video.extract_frames_at_fps",
+        "src.media.samplers.extract_frames_at_fps",
         return_value=[frame1, frame2],
     ), patch(
         "src.analyzers.visual.VisualSentimentAnalyzer.load_image",
@@ -128,10 +128,12 @@ def test_output_structure_via_pipeline(tmp_path: Path) -> None:
 
     fake_bundle.diagnostics = VideoDiagnostics(
         duration_seconds=2.0,
+        sampling_strategy="fixed_fps",
         sampling_fps=1.0,
         frames_extracted=2,
         frames_analyzed=2,
         frame_timestamps=[0.0, 1.0],
+        extraction_seconds=0.1,
         processing_seconds=0.5,
         has_audio=True,
     )
@@ -159,6 +161,7 @@ def test_output_structure_via_pipeline(tmp_path: Path) -> None:
     assert payload["analysis"]["modalities"]["speech"] is not None
     assert payload["analysis"]["transcript"] == "this was bad"
     assert payload["analysis"]["video"]["sampling_fps"] == 1.0
+    assert payload["analysis"]["video"]["sampling_strategy"] == "fixed_fps"
     assert payload["analysis"]["video"]["frames_extracted"] == 2
     assert "frame_debug" not in payload["analysis"]["video"] or payload["analysis"]["video"]["frame_debug"] is None
     assert payload["analysis"]["overall"]["model"] == "poc-fusion"
@@ -203,7 +206,7 @@ def test_temp_cleanup(tmp_path: Path) -> None:
         "src.analyzers.video.probe_video",
         return_value=probe,
     ), patch(
-        "src.analyzers.video.extract_frames_at_fps",
+        "src.media.samplers.extract_frames_at_fps",
         return_value=[frame],
     ), patch("src.analyzers.video._ocr_frame_indices", return_value={0}):
         analyzer.analyze(video)

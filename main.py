@@ -73,6 +73,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Include per-frame debug rows in video diagnostics",
     )
     parser.add_argument(
+        "--sampling-strategy",
+        dest="sampling_strategy",
+        default="fixed_fps",
+        choices=["fixed_fps", "scene_keyframe"],
+        help="Video frame sampling strategy (default: fixed_fps baseline)",
+    )
+    parser.add_argument(
         "--user-id",
         dest="user_id",
         default=None,
@@ -134,6 +141,7 @@ def main(argv: list[str] | None = None) -> int:
             user_id=args.user_id,
             activity_id=args.activity_id,
             video_debug=args.video_debug,
+            sampling_strategy=args.sampling_strategy,
         )
 
     if args.text is None:
@@ -171,8 +179,12 @@ def _run_video(
     user_id: str | None,
     activity_id: str | None,
     video_debug: bool,
+    sampling_strategy: str = "fixed_fps",
 ) -> int:
-    pipeline = MyUniSentimentPipeline(video_debug=video_debug)
+    pipeline = MyUniSentimentPipeline(
+        video_debug=video_debug,
+        video_sampling_strategy=sampling_strategy,
+    )
     activity = ActivityInput(
         activity_id=activity_id or "ACT-VIDEO",
         user_id=user_id or "U-VIDEO",

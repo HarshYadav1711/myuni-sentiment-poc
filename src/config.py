@@ -25,10 +25,11 @@ DEFAULT_WHISPER_MODEL = "base.en"
 DEFAULT_WHISPER_COMPUTE_TYPE = "int8"
 DEFAULT_ASR_LANGUAGE = "en"
 
-# Video frame sampling (MVP v1). Scene detection is intentionally not used.
+# Video frame sampling. Baseline remains fixed ~1 FPS; scene_keyframe is optional.
 DEFAULT_VIDEO_SAMPLE_FPS = 1.0
 DEFAULT_VIDEO_MAX_FRAMES = 60
 DEFAULT_VIDEO_MAX_OCR_FRAMES = 8
+DEFAULT_VIDEO_SAMPLING_STRATEGY = "fixed_fps"
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_FUSION_YAML = _REPO_ROOT / "config" / "fusion.yaml"

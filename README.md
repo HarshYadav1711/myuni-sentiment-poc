@@ -2,14 +2,15 @@
 
 English-first proof of concept for analyzing social activity sentiment on MyUni.
 
-## Current status (Milestone 8)
+## Current status (Milestone 9)
 
 **Working today:**
 - Text / image / video multimodal analysis + explainable late fusion
 - JSONL batch + SQLite persistence + POC daily aggregates
-- **Reproducible evaluation framework** for TweetEval / MVSA / CMU-MOSI (no bundled datasets)
+- Reproducible evaluation framework (TweetEval / MVSA / CMU-MOSI adapters)
+- **Pluggable video sampling:** fixed FPS (baseline) + scene/keyframe (PySceneDetect)
 
-**Not implemented yet:** scene detection, native video VLMs, PostgreSQL, Streamlit demo, full CMU-MOSEI adapter (documented as future).
+**Not implemented yet:** native video VLMs, PostgreSQL, Streamlit demo, full CMU-MOSEI adapter (documented as future).
 
 ## Requirements
 
@@ -37,13 +38,36 @@ python main.py --video data/samples/synthetic_sample.mp4 --caption "Quiet campus
 
 # Include compact per-frame debug rows:
 python main.py --video data/samples/synthetic_sample.mp4 --video-debug
+
+# Alternative sampling strategy (experimental; baseline remains fixed_fps):
+python main.py --video data/samples/synthetic_sample.mp4 --sampling-strategy scene_keyframe
 ```
 
-Or via batch JSONL (`activity_type: "video"`).
+Or via batch JSONL (`activity_type: "video"`). Batch still uses the pipeline default (`fixed_fps`) unless you construct `MyUniSentimentPipeline(video_sampling_strategy=...)`.
 
-## Video strategy (MVP v1)
+## Video sampling strategies (Milestone 9)
 
-- Fixed sampling at **~1 FPS** (configurable; auto-reduced to respect `max_frames=60`)
+Two strategies share the same `FrameSample` / `SampledFrames` structure consumed by `VideoAnalyzer`:
+
+| Strategy | Class | Behavior |
+| --- | --- | --- |
+| `fixed_fps` (baseline) | `FixedFPSSampler` | FFmpeg `fps=` filter; default ~1 FPS; auto-reduced for `max_frames` |
+| `scene_keyframe` | `SceneKeyframeSampler` | PySceneDetect `ContentDetector` → mid-scene (or N) keyframes → FFmpeg stills |
+
+- FFmpeg is **not** removed; scene mode still extracts frames with FFmpeg.
+- Scene mode caps frames (`max_frames`), supports `frames_per_scene`, and by default **falls back** to fixed FPS with a clear warning if detection fails (disable via `SceneSamplingConfig.fallback_to_fixed_fps=False`).
+- Diagnostics include `sampling_strategy`, `extraction_seconds`, optional `scene_count`.
+
+### Experimental comparison (same video, both strategies)
+
+```powershell
+python scripts/compare_video_sampling.py data/samples/synthetic_sample.mp4 --caption "Quiet campus clip" --out outputs/sampling_compare.json
+```
+
+The report lists frame counts, extraction / total analysis times, visual & overall sentiment, modality evidence, and whether the final prediction differs. **It does not declare either strategy better.**
+
+## Video analysis pipeline
+
 - Per-frame visual scoring via existing SigLIP 2 zero-shot path
 - OCR on an evenly spaced subset of frames (`max_ocr_frames=8`)
 - Audio via existing `AudioAnalyzer` (graceful if no speech / no audio stream)
@@ -146,15 +170,16 @@ evaluation/{metrics,common,run}.py
 evaluation/{text,image,video}/
 docs/DATASETS.md
 src/analyzers/{text,visual,ocr,image,audio,video}.py
-src/media/ffmpeg_utils.py
+src/media/{ffmpeg_utils,samplers}.py
 src/storage/{schema,repository,aggregation,service}.py
 src/{pipeline,batch,fusion,config,schemas}.py
+scripts/compare_video_sampling.py
 config/fusion.yaml
 ```
 
 ## Current limitations
 
-- No scene/keyframe detection yet (fixed FPS only)
+- Scene sampling is experimental; fixed FPS remains the default baseline
 - No large native video VLM
 - Daily aggregates are POC means/counts — not client business scores
 - OCR/ASR quality depend on media clarity and installed binaries

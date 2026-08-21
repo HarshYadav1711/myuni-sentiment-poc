@@ -239,6 +239,47 @@ def extract_frames_at_fps(
     return frames
 
 
+def extract_frame_at_timestamp(
+    media_path: PathLike,
+    output_path: PathLike,
+    *,
+    timestamp_seconds: float,
+    ffmpeg_path: Optional[str] = None,
+    timeout_seconds: int = 120,
+) -> Path:
+    """Extract a single JPEG frame near ``timestamp_seconds`` via FFmpeg."""
+    source = Path(media_path)
+    if not source.is_file():
+        raise FileNotFoundError(f"Media file not found: {source}")
+    if timestamp_seconds < 0:
+        raise ValueError("timestamp_seconds must be >= 0")
+
+    dest = Path(output_path)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    exe = find_ffmpeg(ffmpeg_path)
+    # Place -ss before -i for fast seek; acceptable for keyframe approx sampling.
+    cmd = [
+        exe,
+        "-y",
+        "-ss",
+        f"{timestamp_seconds:.3f}",
+        "-i",
+        str(source),
+        "-frames:v",
+        "1",
+        "-q:v",
+        "2",
+        str(dest),
+    ]
+    logger.info("Extracting frame at t=%.3fs -> %s", timestamp_seconds, dest)
+    _run_ffmpeg(cmd, timeout_seconds=timeout_seconds, source=source)
+    if not dest.is_file() or dest.stat().st_size == 0:
+        raise FFmpegError(
+            f"FFmpeg produced no frame at t={timestamp_seconds:.3f}s for {source}",
+        )
+    return dest
+
+
 def _run_ffmpeg(cmd: list[str], *, timeout_seconds: int, source: Path) -> None:
     try:
         completed = subprocess.run(

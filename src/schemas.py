@@ -184,12 +184,15 @@ class VideoDiagnostics(BaseModel):
     """Compact video-level processing diagnostics (default output stays small)."""
 
     duration_seconds: Optional[float] = None
-    sampling_fps: float
+    sampling_strategy: str = "fixed_fps"
+    sampling_fps: Optional[float] = None
     frames_extracted: int = 0
     frames_analyzed: int = 0
     frame_timestamps: list[float] = Field(default_factory=list)
+    extraction_seconds: Optional[float] = None
     processing_seconds: Optional[float] = None
     has_audio: Optional[bool] = None
+    scene_count: Optional[int] = None
     frame_debug: Optional[list[VideoFrameDebug]] = Field(
         default=None,
         description="Present only when debug=True on the video analyzer.",

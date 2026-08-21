@@ -1,4 +1,4 @@
-"""Video activity analysis: fixed-FPS frames + OCR subset + speech + caption fusion inputs."""
+"""Video activity analysis: pluggable frame sampling + OCR subset + speech + caption."""
 
 from __future__ import annotations
 
@@ -15,12 +15,8 @@ from src.analyzers.ocr import is_meaningful_ocr_text
 from src.analyzers.text import TextSentimentAnalyzer
 from src.config import DEFAULT_FUSION, DEFAULT_VIDEO_SAMPLING, FusionConfig, VideoSamplingConfig
 from src.fusion import aggregate_frame_visual_scores, fuse_modalities
-from src.media.ffmpeg_utils import (
-    FFmpegError,
-    FFmpegNotFoundError,
-    extract_frames_at_fps,
-    probe_video,
-)
+from src.media.ffmpeg_utils import FFmpegError, FFmpegNotFoundError, probe_video
+from src.media.samplers import FrameSampler, SceneSamplingConfig, build_frame_sampler
 from src.schemas import (
     SentimentEvidence,
     SpeechAnalysisResult,
@@ -45,7 +41,7 @@ class VideoAnalysisBundle:
     speech_result: Optional[SpeechAnalysisResult]
     diagnostics: VideoDiagnostics
     warnings: list[str] = field(default_factory=list)
-    overall: Optional[SentimentEvidence] = None  # filled when caption provided at pipeline
+    overall: Optional[SentimentEvidence] = None
 
 
 def _ocr_frame_indices(n_frames: int, max_ocr: int) -> set[int]:
@@ -53,7 +49,6 @@ def _ocr_frame_indices(n_frames: int, max_ocr: int) -> set[int]:
         return set()
     if n_frames <= max_ocr:
         return set(range(n_frames))
-    # Evenly spaced indices including first and last when possible.
     positions = {
         int(round(i * (n_frames - 1) / (max_ocr - 1)))
         for i in range(max_ocr)
@@ -62,9 +57,10 @@ def _ocr_frame_indices(n_frames: int, max_ocr: int) -> set[int]:
 
 
 class VideoAnalyzer:
-    """Fixed-FPS video analyzer composing existing image/visual/OCR and audio branches.
+    """Video analyzer with pluggable frame sampling strategies.
 
-    Does not use a native video VLM or scene detection.
+    Baseline strategy: ``fixed_fps`` (~1 FPS via FFmpeg).
+    Alternative: ``scene_keyframe`` (PySceneDetect + FFmpeg stills).
     """
 
     def __init__(
@@ -74,6 +70,9 @@ class VideoAnalyzer:
         audio_analyzer: Optional[AudioAnalyzer] = None,
         text_analyzer: Optional[TextSentimentAnalyzer] = None,
         sampling: VideoSamplingConfig = DEFAULT_VIDEO_SAMPLING,
+        scene_sampling: Optional[SceneSamplingConfig] = None,
+        frame_sampler: Optional[FrameSampler] = None,
+        sampling_strategy: str = "fixed_fps",
         fusion_config: FusionConfig = DEFAULT_FUSION,
         ffmpeg_path: Optional[str] = None,
         ffprobe_path: Optional[str] = None,
@@ -84,11 +83,34 @@ class VideoAnalyzer:
         self._audio = audio_analyzer or AudioAnalyzer(text_analyzer=text_analyzer)
         self._text = text_analyzer
         self.sampling = sampling
+        self.scene_sampling = scene_sampling or SceneSamplingConfig(
+            max_frames=sampling.max_frames,
+            max_ocr_frames=sampling.max_ocr_frames,
+        )
         self.fusion_config = fusion_config
         self.ffmpeg_path = ffmpeg_path
         self.ffprobe_path = ffprobe_path
         self.debug = debug
         self.preserve_temp = preserve_temp
+        self._frame_sampler = frame_sampler or build_frame_sampler(
+            sampling_strategy,
+            sampling=self.sampling,
+            scene=self.scene_sampling,
+        )
+
+    @property
+    def frame_sampler(self) -> FrameSampler:
+        return self._frame_sampler
+
+    def set_frame_sampler(self, sampler: FrameSampler) -> None:
+        self._frame_sampler = sampler
+
+    def set_sampling_strategy(self, strategy: str) -> None:
+        self._frame_sampler = build_frame_sampler(
+            strategy,
+            sampling=self.sampling,
+            scene=self.scene_sampling,
+        )
 
     def set_text_analyzer(self, text_analyzer: TextSentimentAnalyzer) -> None:
         self._text = text_analyzer
@@ -113,48 +135,24 @@ class VideoAnalyzer:
         started = time.perf_counter()
         warnings: list[str] = []
 
-        # Serious probe / decode failures propagate (not hidden).
         probe = probe_video(source, ffprobe_path=self.ffprobe_path)
-        effective_fps = self.sampling.effective_fps(probe.duration_seconds)
-        if effective_fps + 1e-9 < self.sampling.fps:
-            warnings.append(
-                f"Reduced sampling FPS from {self.sampling.fps} to {effective_fps:.4f} "
-                f"to respect max_frames={self.sampling.max_frames}",
-            )
 
         tmp_root: Optional[Path] = None
-        frame_paths: list[Path] = []
-
         try:
             tmp_root = Path(tempfile.mkdtemp(prefix="myuni_video_"))
             frames_dir = tmp_root / "frames"
-            try:
-                frame_paths = extract_frames_at_fps(
-                    source,
-                    frames_dir,
-                    fps=effective_fps,
-                    ffmpeg_path=self.ffmpeg_path,
-                )
-            except FFmpegNotFoundError:
-                raise
-            except FFmpegError:
-                raise
-
-            # Hard cap after extraction in case FPS math undershoots.
-            if len(frame_paths) > self.sampling.max_frames:
-                warnings.append(
-                    f"Truncated extracted frames from {len(frame_paths)} "
-                    f"to max_frames={self.sampling.max_frames}",
-                )
-                frame_paths = frame_paths[: self.sampling.max_frames]
-
-            timestamps = [
-                round(i / effective_fps, 3) for i in range(len(frame_paths))
-            ]
-            ocr_indices = _ocr_frame_indices(
-                len(frame_paths),
-                self.sampling.max_ocr_frames,
+            sampled = self._frame_sampler.sample(
+                source,
+                frames_dir,
+                duration_seconds=probe.duration_seconds,
+                ffmpeg_path=self.ffmpeg_path,
             )
+            warnings.extend(sampled.warnings)
+
+            frame_paths = sampled.paths
+            timestamps = sampled.timestamps
+            max_ocr = self.sampling.max_ocr_frames
+            ocr_indices = _ocr_frame_indices(len(frame_paths), max_ocr)
 
             frame_visuals: list[SentimentEvidence] = []
             ocr_sentiments: list[SentimentEvidence] = []
@@ -208,7 +206,7 @@ class VideoAnalyzer:
                                 ocr_preview=(evidence.ocr_text or "")[:80] or None,
                             ),
                         )
-                except Exception as exc:  # noqa: BLE001 — one frame must not fail the video
+                except Exception as exc:  # noqa: BLE001
                     msg = f"frame[{idx}] analysis failed: {exc}"
                     warnings.append(msg)
                     logger.warning("%s", msg)
@@ -256,12 +254,15 @@ class VideoAnalyzer:
             processing_seconds = time.perf_counter() - started
             diagnostics = VideoDiagnostics(
                 duration_seconds=probe.duration_seconds,
-                sampling_fps=float(effective_fps),
+                sampling_strategy=sampled.strategy,
+                sampling_fps=sampled.sampling_fps,
                 frames_extracted=len(frame_paths),
                 frames_analyzed=frames_analyzed,
                 frame_timestamps=timestamps,
+                extraction_seconds=sampled.extraction_seconds,
                 processing_seconds=float(processing_seconds),
                 has_audio=probe.has_audio,
+                scene_count=sampled.scene_count,
                 frame_debug=frame_debug if self.debug else None,
             )
 
@@ -277,12 +278,12 @@ class VideoAnalyzer:
             overall = overall_fusion.overall
 
             logger.info(
-                "Video analysis complete path=%s frames=%s/%s overall=%s warnings=%s",
+                "Video analysis complete path=%s strategy=%s frames=%s/%s overall=%s",
                 source,
+                sampled.strategy,
                 frames_analyzed,
                 len(frame_paths),
                 overall.label,
-                len(warnings),
             )
 
             return VideoAnalysisBundle(
@@ -333,7 +334,6 @@ class VideoAnalyzer:
                     },
                 )
 
-        # Fallback: score joined OCR text once if sentiments were missing but text exists.
         joined = " ".join(dict.fromkeys(ocr_texts)).strip()
         if not joined or not is_meaningful_ocr_text(joined):
             return None

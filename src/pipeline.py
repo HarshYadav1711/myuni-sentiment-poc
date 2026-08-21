@@ -40,6 +40,7 @@ class MyUniSentimentPipeline:
         video_analyzer: Optional[VideoAnalyzer] = None,
         fusion_config: FusionConfig = DEFAULT_FUSION,
         video_sampling: VideoSamplingConfig = DEFAULT_VIDEO_SAMPLING,
+        video_sampling_strategy: str = "fixed_fps",
         video_debug: bool = False,
     ) -> None:
         self._text_analyzer = text_analyzer or TextSentimentAnalyzer()
@@ -57,6 +58,7 @@ class MyUniSentimentPipeline:
             audio_analyzer=self._audio_analyzer,
             text_analyzer=self._text_analyzer,
             sampling=video_sampling,
+            sampling_strategy=video_sampling_strategy,
             fusion_config=fusion_config,
             debug=video_debug,
         )

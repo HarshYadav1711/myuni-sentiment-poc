@@ -7,4 +7,5 @@ Pillow>=10.0.0,<12
 pytesseract>=0.3.10,<0.4
 faster-whisper>=1.0.0,<2
 PyYAML>=6.0.0,<7
+scenedetect[opencv]>=0.6.4,<0.7
 pytest>=8.0.0,<9
