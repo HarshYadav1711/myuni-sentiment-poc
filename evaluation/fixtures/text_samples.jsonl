@@ -1,0 +1,5 @@
+{"id":"fx-pos","text":"I love this workshop","label":"positive"}
+{"id":"fx-neu","text":"The meeting is at noon","label":"neutral"}
+{"id":"fx-neg","text":"This is terrible news","label":"negative"}
+{"id":"fx-pos2","text":"What an amazing result","label":2}
+{"id":"fx-neg2","text":"I hate waiting in line","label":0}

@@ -2,15 +2,14 @@
 
 English-first proof of concept for analyzing social activity sentiment on MyUni.
 
-## Current status (Milestone 7)
+## Current status (Milestone 8)
 
 **Working today:**
 - Text / image / video multimodal analysis + explainable late fusion
-- JSONL batch ingestion
-- **SQLite persistence** (`batch_runs`, `activities`, `analysis_results`, `daily_user_scores`)
-- **POC daily user aggregates** (not the client business score)
+- JSONL batch + SQLite persistence + POC daily aggregates
+- **Reproducible evaluation framework** for TweetEval / MVSA / CMU-MOSI (no bundled datasets)
 
-**Not implemented yet:** scene detection, native video VLMs, PostgreSQL, Streamlit demo.
+**Not implemented yet:** scene detection, native video VLMs, PostgreSQL, Streamlit demo, full CMU-MOSEI adapter (documented as future).
 
 ## Requirements
 
@@ -102,23 +101,50 @@ fused_score = sum(score_i * effective_weight_i) / sum(effective_weight_i)
 | ASR | faster-whisper `base.en` (CPU `int8`) |
 | Media | FFmpeg / ffprobe |
 
-## Tests
+## Benchmark evaluation (Milestone 8)
+
+Dataset acquisition, licenses, and JSONL formats: **[docs/DATASETS.md](docs/DATASETS.md)**.
+
+This repo does **not** redistribute TweetEval / MVSA / MOSI files.
 
 ```powershell
-# Fast unit tests
+# Stub predictor on bundled synthetic fixtures (no model download)
+python -m evaluation.run text --data evaluation/fixtures/text_samples.jsonl --limit 5 --stub --out outputs/eval_text_stub
+
+# After you prepare local indexes (see docs/DATASETS.md):
+python -m evaluation.run text --data data/eval/tweeteval_index.jsonl --limit 100 --out outputs/eval_tweeteval
+python -m evaluation.run image --data data/eval/mvsa_index.jsonl --limit 20 --out outputs/eval_mvsa
+python -m evaluation.run video --data data/eval/mosi_index.jsonl --limit 10 --out outputs/eval_mosi
+
+# Optional TweetEval via Hugging Face datasets (network; not used by unit tests)
+pip install datasets
+python -m evaluation.run text --tweeteval-hf --split test --limit 50 --stub
+```
+
+Outputs: `metrics.json` + `predictions.csv` + console summary (accuracy, P/R, macro/weighted F1, confusion matrix; MOSI also MAE/Pearson with explicit 3-way mapping documented).
+
+## Tests (keep these separate)
+
+```powershell
+# 1) Unit tests — fast, no model downloads (includes evaluation fixtures)
 pytest -q -m "not integration"
 
-# Default suite (skips optional ASR/video integration)
+# 2) Integration / model tests — downloads HF/ASR weights as needed
 pytest -q
+# Optional heavy smoke:
+#   $env:MYUNI_RUN_ASR_INTEGRATION=1; pytest -q -m asr_integration
+#   $env:MYUNI_RUN_VIDEO_INTEGRATION=1; pytest -q -m video_integration
 
-# Optional video smoke (downloads models; needs FFmpeg)
-$env:MYUNI_RUN_VIDEO_INTEGRATION = "1"
-pytest -q -m video_integration
+# 3) Benchmark evaluation — run via evaluation CLI against local/HF data (not pytest)
+python -m evaluation.run text --data evaluation/fixtures/text_samples.jsonl --stub --limit 5
 ```
 
 ## Project layout
 
 ```text
+evaluation/{metrics,common,run}.py
+evaluation/{text,image,video}/
+docs/DATASETS.md
 src/analyzers/{text,visual,ocr,image,audio,video}.py
 src/media/ffmpeg_utils.py
 src/storage/{schema,repository,aggregation,service}.py
