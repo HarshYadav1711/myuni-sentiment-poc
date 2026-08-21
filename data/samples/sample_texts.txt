@@ -1,0 +1,7 @@
+# Sample English social-style texts for manual CLI checks (Milestone 1).
+
+I really enjoyed today's workshop.
+This was terrible.
+The lecture is scheduled for Thursday at 3pm.
+Fantastic. Another surprise assignment.
+Amazing result again 💀
