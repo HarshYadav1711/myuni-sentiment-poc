@@ -22,8 +22,10 @@ logger = logging.getLogger(__name__)
 PathLike = Union[str, Path]
 
 UNSUPPORTED_NOTE = (
-    "Activity type recognized but video/audio inference is not implemented yet "
-    "(Milestone 3). No sentiment was produced."
+    "Video activity recognized, but full video processing (frame sampling + "
+    "multimodal fusion) is not implemented yet (Milestone 4 provides the speech "
+    "branch via AudioAnalyzer / pipeline.analyze_speech only). No video sentiment "
+    "was produced."
 )
 
 

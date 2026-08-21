@@ -2,27 +2,25 @@
 
 English-first proof of concept for analyzing social activity sentiment on MyUni.
 
-## Current status (Milestone 3)
+## Current status (Milestone 4)
 
 **Working today:**
 - End-to-end **English text** sentiment
 - Validated activity contract + **JSONL batch ingestion**
-- **Image** activities with:
-  - zero-shot **visual** sentiment (SigLIP 2)
-  - **OCR** text extraction + OCR text sentiment (when Tesseract is available)
-  - optional **caption** text sentiment kept as a separate modality
-  - simple explainable **POC fusion** into `analysis.overall`
+- **Image** activities (SigLIP 2 visual + OCR + caption + POC fusion)
+- **Speech/audio branch** for future video: FFmpeg extraction + faster-whisper ASR + transcript sentiment (`AudioAnalyzer` / `pipeline.analyze_speech`)
 
-**Recognized but not analyzed yet:** video (reported as `unsupported`).
+**Not wired yet:** full **video** activities (frame sampling + multimodal fusion). Batch still reports video as `unsupported`.
 
-**Not implemented yet:** video/audio/ASR, SQLite storage, daily aggregation, Streamlit demo.
+**Not implemented yet:** SQLite storage, daily aggregation, Streamlit demo.
 
 ## Requirements
 
 - Python 3.10+ recommended
 - ~16 GB RAM; **CPU is supported**; GPU optional
-- First text/visual analysis downloads Hugging Face weights (network once)
-- Optional: [Tesseract OCR](https://github.com/tesseract-ocr/tesseract) binary for OCR (pipeline continues without it)
+- First text/visual/ASR analysis downloads model weights (network once)
+- Optional: [Tesseract OCR](https://github.com/tesseract-ocr/tesseract) for image OCR
+- **Required for speech branch:** [FFmpeg](https://ffmpeg.org/) on `PATH`
 
 ## Setup (Windows-friendly)
 
@@ -35,58 +33,51 @@ pip install -r requirements.txt
 python scripts/generate_sample_image.py
 ```
 
+### FFmpeg (required for speech/audio extraction)
+
+1. Install via winget: `winget install Gyan.FFmpeg`
+   - Or download a release build: https://www.gyan.dev/ffmpeg/builds/
+2. Ensure `ffmpeg.exe` is on `PATH`, then **open a new terminal**
+3. Verify: `ffmpeg -version`
+4. If FFmpeg is missing, `AudioAnalyzer` / `analyze_speech` raises an actionable `FFmpegNotFoundError` (does not invent transcripts)
+
 ### Tesseract OCR (optional, Windows)
 
 1. Install the UB Mannheim Windows build: https://github.com/UB-Mannheim/tesseract/wiki
-2. Ensure `tesseract.exe` is on `PATH` (installer option), or set:
-   ```powershell
-   $env:TESSDATA_PREFIX = "C:\Program Files\Tesseract-OCR\tessdata"
-   ```
+2. Ensure `tesseract.exe` is on `PATH`
 3. Verify: `tesseract --version`
-4. If Tesseract is missing, image analysis still returns visual (+ caption) evidence and a clear `OCR unavailable` warning — it does **not** crash the pipeline.
+4. If missing, image analysis still returns visual (+ caption) evidence with an `OCR unavailable` warning
 
 ## Models
 
 ### Text
 
-`cardiffnlp/twitter-roberta-base-sentiment-latest`
+`cardiffnlp/twitter-roberta-base-sentiment-latest` — lazy-loaded; score = `P(positive) - P(negative)`
 
-- Lazy-loaded; score = `P(positive) - P(negative)` ≈ `[-1, +1]`
+### Visual
 
-### Visual (zero-shot, not a trained sentiment classifier)
+`google/siglip2-base-patch16-224` — zero-shot concept scoring (not a trained sentiment classifier)
 
-Exact checkpoint: **`google/siglip2-base-patch16-224`**
+### Speech / ASR
 
-Candidate concept prompts (configurable in `src/config.py`):
+Default: **`base.en`** via **faster-whisper** (CPU, `int8` compute type). Configurable in `src/config.py` / `AudioAnalyzer(whisper_model=...)`.
 
-- positive → `"a positive and pleasant situation"`
-- neutral → `"a neutral everyday situation"`
-- negative → `"a negative or unpleasant situation"`
+- Lazy model load
+- CUDA not required
+- Temporary extracted WAV files are cleaned up after each run
+- Empty / no-speech media → warning, **no fabricated transcript**, no speech sentiment
 
-Probabilities are a softmax over the three concept logits. Raw SigLIP sigmoid similarities are preserved under `details.raw_similarities`.
+## Speech branch API (Milestone 4)
 
-### OCR
+```python
+from src.pipeline import MyUniSentimentPipeline
 
-`pytesseract` + system Tesseract. Meaningful OCR text is scored with the same text model; OCR evidence stays separate from caption (`modalities.text`) and visual (`modalities.visual`).
+pipeline = MyUniSentimentPipeline()
+speech = pipeline.analyze_speech("path/to/clip.mp4")  # or .wav/.mp3/...
+print(speech.transcript, speech.sentiment, speech.warnings)
+```
 
-## Image overall fusion (POC-only)
-
-Documented in `src/fusion.py` / `src/config.py`:
-
-- confidence-weighted average of available modality scores (`text` caption, `visual`, `ocr`)
-- label from fused score vs a small neutral band
-- **Not** the future client business scoring methodology
-
-## Activity contract (batch)
-
-| Field | Rule |
-| --- | --- |
-| `activity_id` / `user_id` | Required non-blank |
-| `activity_type` | `text` \| `image` \| `video` |
-| `text` | Required for `text`; optional caption for `image`/`video` |
-| `media_path` | Required for `image`/`video` |
-| `created_at` | Required ISO-8601 |
-| `metadata` / `content_kind` | Optional |
+Returned fields include: transcript, language, segments (timestamps), transcription duration, audio duration when available, speech sentiment, ASR model id, warnings.
 
 ## CLI
 
@@ -94,25 +85,25 @@ Documented in `src/fusion.py` / `src/config.py`:
 # Single text
 python main.py "I really enjoyed today's workshop."
 
-# Batch (text + image processed; video unsupported)
+# Batch (text + image processed; video still unsupported for full fusion)
 python main.py --batch data/samples/activities.jsonl
 ```
-
-Sample image (synthetic, generated locally — not a copyrighted asset):
-
-`data/samples/synthetic_sample.png` via `python scripts/generate_sample_image.py`
 
 ## Tests
 
 ```powershell
-# Fast (skips real HF visual download)
+# Fast unit tests (no large model downloads for ASR)
 pytest -q -m "not integration"
 
-# Full (includes text + SigLIP smoke)
+# Includes text + SigLIP smoke (still skips optional ASR integration)
 pytest -q
+
+# Optional ASR integration (downloads Whisper; needs FFmpeg)
+$env:MYUNI_RUN_ASR_INTEGRATION = "1"
+pytest -q -m asr_integration
 ```
 
-Image unit tests cover: openable sample, missing path, corrupt file, OCR unavailable, OCR empty, caption independence, schema shape. They do **not** assert brittle ML probabilities.
+Speech unit tests cover: path validation, FFmpeg missing/failure handling, empty transcript behavior, standardized result shape, temp cleanup.
 
 ## Project layout
 
@@ -122,6 +113,8 @@ src/
   analyzers/visual.py
   analyzers/ocr.py
   analyzers/image.py
+  analyzers/audio.py      # FFmpeg + faster-whisper speech branch
+  media/ffmpeg_utils.py
   batch.py
   config.py
   fusion.py
@@ -131,9 +124,8 @@ src/
 
 ## Current limitations
 
-- Video/audio not implemented
-- SigLIP prompts are heuristic zero-shot concepts, not supervised sentiment labels
-- OCR quality depends on image clarity and Tesseract install
-- English only
+- Full video frame sampling + multimodal fusion not implemented (speech branch only)
+- SigLIP prompts are heuristic zero-shot concepts
+- OCR quality depends on Tesseract + image clarity
+- ASR quality depends on audio clarity; English-only MVP (`base.en`)
 - No SQLite / aggregation / Streamlit yet
-- First visual load downloads ~weights and uses additional RAM alongside the text model

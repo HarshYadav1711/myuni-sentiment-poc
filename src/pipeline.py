@@ -8,6 +8,7 @@ from typing import Optional
 
 from src.analyzers.image import ImageAnalyzer
 from src.analyzers.text import TextSentimentAnalyzer
+from src.analyzers.audio import AudioAnalyzer
 from src.config import DEFAULT_FUSION, FusionConfig
 from src.fusion import fuse_modality_scores
 from src.schemas import (
@@ -16,6 +17,7 @@ from src.schemas import (
     AnalysisBlock,
     InputMetadata,
     ModalityBundle,
+    SpeechAnalysisResult,
 )
 
 logger = logging.getLogger(__name__)
@@ -26,14 +28,16 @@ _PREVIEW_LEN = 120
 class MyUniSentimentPipeline:
     """Routes activities through modality analyzers and returns standardized results.
 
-    Milestone 3: ``text`` and ``image`` activities are analyzed; ``video`` remains
-    unimplemented at the analyzer layer (batch reports unsupported).
+    Milestone 4: ``text`` and ``image`` activities are analyzed. The speech/audio
+    branch (``AudioAnalyzer`` / ``analyze_speech``) is available for future video
+    work; full video frame sampling + fusion is not wired yet.
     """
 
     def __init__(
         self,
         text_analyzer: Optional[TextSentimentAnalyzer] = None,
         image_analyzer: Optional[ImageAnalyzer] = None,
+        audio_analyzer: Optional[AudioAnalyzer] = None,
         fusion_config: FusionConfig = DEFAULT_FUSION,
     ) -> None:
         self._text_analyzer = text_analyzer or TextSentimentAnalyzer()
@@ -42,6 +46,10 @@ class MyUniSentimentPipeline:
         )
         # Ensure image OCR scoring shares the same lazy text model instance.
         self._image_analyzer.set_text_analyzer(self._text_analyzer)
+        self._audio_analyzer = audio_analyzer or AudioAnalyzer(
+            text_analyzer=self._text_analyzer,
+        )
+        self._audio_analyzer.set_text_analyzer(self._text_analyzer)
         self._fusion_config = fusion_config
 
     @property
@@ -51,6 +59,14 @@ class MyUniSentimentPipeline:
     @property
     def image_analyzer(self) -> ImageAnalyzer:
         return self._image_analyzer
+
+    @property
+    def audio_analyzer(self) -> AudioAnalyzer:
+        return self._audio_analyzer
+
+    def analyze_speech(self, media_path: object) -> SpeechAnalysisResult:
+        """Run the speech branch on an audio/video media path (no video fusion)."""
+        return self._audio_analyzer.analyze(media_path)  # type: ignore[arg-type]
 
     def analyze_text(
         self,
@@ -73,7 +89,10 @@ class MyUniSentimentPipeline:
         )
 
     def analyze_activity(self, activity: ActivityInput) -> ActivityAnalysisResult:
-        """Analyze a validated ActivityInput (text or image)."""
+        """Analyze a validated ActivityInput (text or image).
+
+        Video activities are not fully implemented yet (see ``analyze_speech``).
+        """
         if activity.activity_type == "text":
             assert activity.text is not None
             cleaned = self._text_analyzer.validate_text(activity.text)

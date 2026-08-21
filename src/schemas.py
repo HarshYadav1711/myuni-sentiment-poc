@@ -107,7 +107,32 @@ class ModalityBundle(BaseModel):
     text: Optional[SentimentEvidence] = None  # caption / primary text
     visual: Optional[SentimentEvidence] = None
     ocr: Optional[SentimentEvidence] = None
-    # speech reserved for video milestone
+    speech: Optional[SentimentEvidence] = None
+
+
+class SpeechSegment(BaseModel):
+    """Timed ASR segment from faster-whisper."""
+
+    start: float
+    end: float
+    text: str
+
+
+class SpeechAnalysisResult(BaseModel):
+    """Structured speech-branch output (Milestone 4). Not full video fusion."""
+
+    transcript: Optional[str] = None
+    language: Optional[str] = None
+    segments: list[SpeechSegment] = Field(default_factory=list)
+    transcription_seconds: Optional[float] = None
+    audio_duration_seconds: Optional[float] = None
+    sentiment: Optional[SentimentEvidence] = None
+    asr_model: str
+    warnings: list[str] = Field(default_factory=list)
+    details: Optional[dict[str, Any]] = None
+
+    def model_dump_json_compatible(self) -> dict[str, Any]:
+        return self.model_dump(mode="json")
 
 
 class AnalysisBlock(BaseModel):
@@ -117,6 +142,10 @@ class AnalysisBlock(BaseModel):
     ocr_text: Optional[str] = Field(
         default=None,
         description="Normalized OCR string when extracted (may exist without ocr sentiment).",
+    )
+    transcript: Optional[str] = Field(
+        default=None,
+        description="ASR transcript when available (speech branch / future video).",
     )
 
 

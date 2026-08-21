@@ -19,6 +19,13 @@ DEFAULT_VISUAL_PROMPTS: dict[str, str] = {
 # Minimum alphanumeric characters before OCR text is treated as meaningful.
 OCR_MIN_ALNUM_CHARS = 3
 
+# faster-whisper model size. base.en is CPU-friendly on ~16 GB RAM.
+DEFAULT_WHISPER_MODEL = "base.en"
+# int8 is the conservative CPU compute type for faster-whisper.
+DEFAULT_WHISPER_COMPUTE_TYPE = "int8"
+# Assumed language for English-only MVP (also passed to Whisper).
+DEFAULT_ASR_LANGUAGE = "en"
+
 
 @dataclass(frozen=True)
 class FusionConfig:
