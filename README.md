@@ -2,15 +2,16 @@
 
 English-first proof of concept for analyzing social activity sentiment on MyUni.
 
-## Current status (Milestone 9)
+## Current status (Milestone 10)
 
 **Working today:**
 - Text / image / video multimodal analysis + explainable late fusion
 - JSONL batch + SQLite persistence + POC daily aggregates
 - Reproducible evaluation framework (TweetEval / MVSA / CMU-MOSI adapters)
-- **Pluggable video sampling:** fixed FPS (baseline) + scene/keyframe (PySceneDetect)
+- Pluggable video sampling: fixed FPS (baseline) + scene/keyframe (PySceneDetect)
+- **Streamlit demo UI** (`app.py`) — thin client over the same pipeline
 
-**Not implemented yet:** native video VLMs, PostgreSQL, Streamlit demo, full CMU-MOSEI adapter (documented as future).
+**Not implemented yet:** native video VLMs, PostgreSQL, auth/deployment, full CMU-MOSEI adapter (documented as future).
 
 ## Requirements
 
@@ -30,6 +31,16 @@ winget install Gyan.FFmpeg   # then reopen terminal; ffmpeg -version / ffprobe -
 python scripts/generate_sample_image.py
 python scripts/generate_sample_video.py
 ```
+
+## Streamlit demo (Milestone 10)
+
+Thin UI over `MyUniSentimentPipeline` — **no duplicated inference**. Models load once per session (`st.cache_resource`); analysis results are not cached across inputs. Uploaded media is written to a temp folder and deleted after each run.
+
+```powershell
+streamlit run app.py
+```
+
+Tabs: **Text** · **Image** · **Video** (fixed 1 FPS or scene/keyframes). Sidebar shows FFmpeg / Tesseract availability with actionable install hints.
 
 ## Analyze a video
 
@@ -171,14 +182,17 @@ evaluation/{text,image,video}/
 docs/DATASETS.md
 src/analyzers/{text,visual,ocr,image,audio,video}.py
 src/media/{ffmpeg_utils,samplers}.py
+src/ui/display.py
 src/storage/{schema,repository,aggregation,service}.py
 src/{pipeline,batch,fusion,config,schemas}.py
 scripts/compare_video_sampling.py
+app.py
 config/fusion.yaml
 ```
 
 ## Current limitations
 
+- Streamlit demo is local-only (no auth / no cloud deploy)
 - Scene sampling is experimental; fixed FPS remains the default baseline
 - No large native video VLM
 - Daily aggregates are POC means/counts — not client business scores
