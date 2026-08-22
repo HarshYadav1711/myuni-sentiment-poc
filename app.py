@@ -459,5 +459,6 @@ def main() -> None:
         tab_video()
 
 
-if __name__ == "__main__":
-    main()
+# Streamlit re-executes this file on each interaction; do not guard with
+# ``if __name__ == "__main__"`` — that block is skipped under Streamlit.
+main()
