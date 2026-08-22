@@ -113,6 +113,7 @@ Per-modality `SentimentEvidence.model` fields remain the primary modality-level 
 2. **Integration** — full pytest or opt-in ASR/video markers (downloads weights)
 3. **Smoke** — `python scripts/smoke_poc.py` (health + eval stub; optional model path via env var)
 4. **Benchmark** — `python -m evaluation.run ...` against local indexes
+5. **Controlled experiment** — `python -m experiment.run --manifest ... --out ...` for JSON/CSV/Markdown evidence packs
 
 ## Known non-goals (current POC)
 

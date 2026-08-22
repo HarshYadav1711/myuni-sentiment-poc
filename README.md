@@ -119,11 +119,26 @@ See **[docs/DATASETS.md](docs/DATASETS.md)**. This repo does not redistribute Tw
 python -m evaluation.run text --data evaluation/fixtures/text_samples.jsonl --stub --limit 5 --out outputs/eval_text_stub
 ```
 
+## Controlled experiments (reporting milestone)
+
+Manifest-driven runs for reproducible client/project-lead evidence. Uses the same pipeline as CLI/Streamlit; exports **JSON + CSV + Markdown**.
+
+```powershell
+python -m experiment.run --manifest experiment/fixtures/poc_manifest.json --out outputs/experiment_run
+```
+
+Outputs: `results.json`, `results.csv`, `report.md` — configuration, model IDs, per-modality accuracy/F1 (when gold labels supplied), latency stats, warnings, gold disagreements, modality conflict examples, and video fixed-FPS vs scene/keyframe comparisons. Reports state limitations explicitly; they do **not** claim benchmark superiority.
+
+Manifest sample fields: `sample_id`, `modality`, `text`/`path`, optional `gold_label`, `user_id`, `notes`. Set `"video_compare_strategies": true` for dual video sampling on video rows.
+
 ## Testing
 
 ```powershell
 # Fast unit tests (no model downloads)
 pytest -q -m "not integration"
+
+# Experiment runner tests only
+pytest -q tests/test_experiment.py -m "not integration"
 
 # Full suite (may download HF / ASR weights)
 pytest -q
@@ -147,6 +162,7 @@ main.py                         CLI entrypoint
 config/fusion.yaml              POC fusion weights (not client scoring)
 docs/{ARCHITECTURE,DATASETS}.md
 evaluation/                     Benchmark adapters
+experiment/                     Manifest-driven POC experiment runner
 scripts/{smoke_poc,compare_video_sampling,...}.py
 src/{pipeline,config,schemas,fusion,batch,runtime_info,env_check}.py
 src/analyzers/{text,visual,ocr,image,audio,video}.py

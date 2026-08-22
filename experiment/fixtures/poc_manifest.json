@@ -1,0 +1,50 @@
+{
+  "experiment_id": "poc-synthetic-local-v1",
+  "name": "MyUni POC synthetic/local sample pack",
+  "description": "Controlled local samples for client/project-lead discussion. Gold labels are illustrative placeholders for synthetic assets — not benchmark claims.",
+  "video_compare_strategies": true,
+  "samples": [
+    {
+      "sample_id": "TXT-001",
+      "modality": "text",
+      "text": "Great workshop today, really enjoyed the session.",
+      "gold_label": "positive",
+      "user_id": "U-DEMO-1",
+      "notes": "Synthetic positive text"
+    },
+    {
+      "sample_id": "TXT-002",
+      "modality": "text",
+      "text": "The cafeteria closes at 6pm.",
+      "gold_label": "neutral",
+      "user_id": "U-DEMO-1",
+      "notes": "Synthetic neutral text"
+    },
+    {
+      "sample_id": "TXT-003",
+      "modality": "text",
+      "text": "This outage ruined the entire afternoon.",
+      "gold_label": "negative",
+      "user_id": "U-DEMO-2",
+      "notes": "Synthetic negative text"
+    },
+    {
+      "sample_id": "IMG-001",
+      "modality": "image",
+      "path": "data/samples/synthetic_sample.png",
+      "text": "Campus event poster",
+      "gold_label": "neutral",
+      "user_id": "U-DEMO-1",
+      "notes": "Generate via: python scripts/generate_sample_image.py"
+    },
+    {
+      "sample_id": "VID-001",
+      "modality": "video",
+      "path": "data/samples/synthetic_sample.mp4",
+      "text": "Short synthetic campus clip",
+      "gold_label": "neutral",
+      "user_id": "U-DEMO-1",
+      "notes": "Generate via: python scripts/generate_sample_video.py; compare_sampling enabled at manifest level"
+    }
+  ]
+}
