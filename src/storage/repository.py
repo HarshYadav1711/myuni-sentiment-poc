@@ -55,9 +55,11 @@ class SentimentRepository:
         self._init_schema()
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(self.db_path))
+        conn = sqlite3.connect(str(self.db_path), timeout=30.0)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA busy_timeout = 30000")
         return conn
 
     @contextmanager
@@ -140,6 +142,17 @@ class SentimentRepository:
                 (activity_id,),
             ).fetchone()
         return row is not None
+
+    def get_analysis_status(self, activity_id: str) -> Optional[str]:
+        """Return stored analysis status ('processed', 'failed', ...) or None."""
+        row = self.get_analysis(activity_id)
+        if row is None:
+            return None
+        status = row.get("status")
+        return str(status) if status is not None else None
+
+    def has_processed_analysis(self, activity_id: str) -> bool:
+        return self.get_analysis_status(activity_id) == "processed"
 
     def insert_activity(
         self,

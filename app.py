@@ -10,6 +10,7 @@ from __future__ import annotations
 import sys
 import tempfile
 import uuid
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -20,7 +21,8 @@ ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.media.ffmpeg_utils import FFmpegNotFoundError, find_ffmpeg, find_ffprobe
+from src.env_check import check_ffmpeg, check_scenedetect, check_tesseract
+from src.media.ffmpeg_utils import FFmpegNotFoundError
 from src.pipeline import MyUniSentimentPipeline
 from src.schemas import ActivityAnalysisResult, ActivityInput, SentimentEvidence
 from src.ui.display import (
@@ -32,6 +34,8 @@ from src.ui.display import (
     label_color,
     overall_headline,
 )
+
+logger = logging.getLogger(__name__)
 
 _CSS = """
 <style>
@@ -84,42 +88,28 @@ def get_pipeline() -> MyUniSentimentPipeline:
 
 @st.cache_data(ttl=300, show_spinner=False)
 def check_ffmpeg_available() -> tuple[bool, str]:
-    try:
-        find_ffmpeg()
-        find_ffprobe()
-        return True, "FFmpeg / ffprobe found on PATH."
-    except FFmpegNotFoundError as exc:
-        return False, str(exc)
-    except Exception as exc:  # noqa: BLE001
-        return False, str(exc)
+    return check_ffmpeg()
 
 
 @st.cache_data(ttl=300, show_spinner=False)
 def check_tesseract_available() -> tuple[bool, str]:
-    try:
-        import pytesseract
-        from pytesseract import TesseractNotFoundError
-    except ImportError:
-        return False, "pytesseract is not installed."
-    try:
-        ver = pytesseract.get_tesseract_version()
-        return True, f"Tesseract available (version {ver})."
-    except TesseractNotFoundError:
-        return False, (
-            "Tesseract executable not found. Install Tesseract OCR and add it to PATH "
-            "(Windows: https://github.com/UB-Mannheim/tesseract/wiki)."
-        )
-    except Exception as exc:  # noqa: BLE001
-        return False, f"Tesseract check failed: {exc}"
+    return check_tesseract()
 
 
 @st.cache_data(ttl=600, show_spinner=False)
 def scene_sampling_available() -> bool:
+    ok, _ = check_scenedetect()
+    return ok
+
+
+def _cleanup_temp_dir(path: Path) -> None:
+    import shutil
+
     try:
-        import scenedetect  # noqa: F401
-        return True
-    except ImportError:
-        return False
+        shutil.rmtree(path, ignore_errors=False)
+    except OSError as exc:
+        logger.warning("Failed to remove temporary upload dir %s: %s", path, exc)
+        st.warning(f"Temporary upload folder could not be deleted: {exc}")
 
 
 def _new_ids(prefix: str) -> tuple[str, str]:
@@ -181,6 +171,21 @@ def _render_warnings(warnings: list[str]) -> None:
             st.info(hint)
 
 
+def _render_runtime(result: ActivityAnalysisResult) -> None:
+    runtime = result.analysis.runtime
+    if runtime is None:
+        return
+    with st.expander("Models & sampling configuration", expanded=False):
+        st.write(
+            {
+                "models": runtime.models,
+                "video_sampling": runtime.video_sampling,
+                "fusion_source": runtime.fusion_source,
+                "note": runtime.note,
+            },
+        )
+
+
 def _render_fusion(result: ActivityAnalysisResult) -> None:
     summary = fusion_summary(result.analysis.fusion)
     if not summary:
@@ -227,6 +232,7 @@ def tab_text() -> None:
             text_ev = result.analysis.modalities.text
             if text_ev is not None:
                 _render_evidence_block("Text evidence", text_ev)
+            _render_runtime(result)
             _render_fusion(result)
             _render_warnings(result.analysis.warnings)
         except ValueError as exc:
@@ -275,14 +281,13 @@ def tab_image() -> None:
             _render_evidence_block("OCR sentiment", mods.ocr)
             if mods.text is not None:
                 _render_evidence_block("Caption sentiment", mods.text)
+            _render_runtime(result)
             _render_fusion(result)
             _render_warnings(result.analysis.warnings)
         except Exception as exc:  # noqa: BLE001
             st.error(f"Analysis failed: {exc}")
         finally:
-            import shutil
-
-            shutil.rmtree(tmp_root, ignore_errors=True)
+            _cleanup_temp_dir(tmp_root)
 
 
 def tab_video() -> None:
@@ -396,6 +401,7 @@ def tab_video() -> None:
             if mods.text is not None:
                 _render_evidence_block("Caption sentiment", mods.text)
 
+            _render_runtime(result)
             _render_fusion(result)
             _render_warnings(result.analysis.warnings)
         except FFmpegNotFoundError as exc:
@@ -403,9 +409,7 @@ def tab_video() -> None:
         except Exception as exc:  # noqa: BLE001
             st.error(f"Analysis failed: {humanize_ffmpeg_error(exc)}")
         finally:
-            import shutil
-
-            shutil.rmtree(tmp_root, ignore_errors=True)
+            _cleanup_temp_dir(tmp_root)
 
 
 def main() -> None:

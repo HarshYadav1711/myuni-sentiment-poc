@@ -178,8 +178,9 @@ class PersistentBatchRunner:
                 None,
             )
 
-        # Idempotency: do not duplicate activity_id silently.
-        if self.repo.activity_exists(activity.activity_id):
+        # Idempotency: skip successful analyses; allow retry after failure.
+        existing_status = self.repo.get_analysis_status(activity.activity_id)
+        if existing_status == "processed":
             return (
                 BatchRecordOutcome(
                     line_number=line_number,
@@ -188,28 +189,35 @@ class PersistentBatchRunner:
                     user_id=activity.user_id,
                     activity_type=activity.activity_type,
                     note=(
-                        f"activity_id={activity.activity_id} already stored; "
+                        f"activity_id={activity.activity_id} already processed; "
                         "skipped to avoid silent duplication"
                     ),
                 ),
                 None,
             )
 
-        inserted = self.repo.insert_activity(activity, batch_id=batch_id)
-        if not inserted:
-            return (
-                BatchRecordOutcome(
-                    line_number=line_number,
-                    status="skipped",
-                    activity_id=activity.activity_id,
-                    user_id=activity.user_id,
-                    activity_type=activity.activity_type,
-                    note=(
-                        f"activity_id={activity.activity_id} already stored; "
-                        "skipped to avoid silent duplication"
+        if not self.repo.activity_exists(activity.activity_id):
+            inserted = self.repo.insert_activity(activity, batch_id=batch_id)
+            if not inserted:
+                return (
+                    BatchRecordOutcome(
+                        line_number=line_number,
+                        status="skipped",
+                        activity_id=activity.activity_id,
+                        user_id=activity.user_id,
+                        activity_type=activity.activity_type,
+                        note=(
+                            f"activity_id={activity.activity_id} already stored; "
+                            "skipped to avoid silent duplication"
+                        ),
                     ),
-                ),
-                None,
+                    None,
+                )
+        elif existing_status == "failed":
+            logger.info(
+                "Retrying previously failed activity_id=%s line=%s",
+                activity.activity_id,
+                line_number,
             )
 
         try:
@@ -226,6 +234,7 @@ class PersistentBatchRunner:
                 status="failed",
                 batch_id=batch_id,
                 error=str(exc),
+                processed_at=activity.created_at,
             )
             return (
                 BatchRecordOutcome(

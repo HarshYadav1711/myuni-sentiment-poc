@@ -12,6 +12,7 @@ from src.analyzers.text import TextSentimentAnalyzer
 from src.analyzers.video import VideoAnalyzer
 from src.config import DEFAULT_FUSION, DEFAULT_VIDEO_SAMPLING, FusionConfig, VideoSamplingConfig
 from src.fusion import fuse_modalities
+from src.runtime_info import build_poc_runtime_info
 from src.schemas import (
     ActivityAnalysisResult,
     ActivityInput,
@@ -168,6 +169,7 @@ class MyUniSentimentPipeline:
                 overall=fusion.overall,
                 modalities=ModalityBundle(text=evidence),
                 fusion=fusion.diagnostics,
+                runtime=build_poc_runtime_info(self),
             ),
         )
 
@@ -237,6 +239,7 @@ class MyUniSentimentPipeline:
                 overall=fusion.overall,
                 modalities=modalities,
                 fusion=fusion.diagnostics,
+                runtime=build_poc_runtime_info(self),
                 warnings=list(image_evidence.warnings),
                 ocr_text=image_evidence.ocr_text,
             ),
@@ -313,6 +316,7 @@ class MyUniSentimentPipeline:
                     speech=bundle.speech,
                 ),
                 fusion=fusion.diagnostics,
+                runtime=build_poc_runtime_info(self),
                 warnings=list(bundle.warnings),
                 ocr_text=bundle.ocr_text,
                 transcript=bundle.transcript,

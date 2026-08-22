@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import logging
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,7 +14,8 @@ ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.batch import BatchIngestor
+from src.logging_config import configure_logging
+from src.env_check import build_health_report
 from src.pipeline import MyUniSentimentPipeline
 from src.schemas import ActivityInput
 from src.storage.repository import SentimentRepository
@@ -92,6 +92,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional activity identifier (e.g. ACT0042)",
     )
     parser.add_argument(
+        "--health",
+        action="store_true",
+        help="Print environment / dependency health report (JSON) and exit",
+    )
+    parser.add_argument(
         "--log-level",
         default="WARNING",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
@@ -113,10 +118,17 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    logging.basicConfig(
-        level=getattr(logging, args.log_level),
-        format="%(levelname)s %(name)s: %(message)s",
-    )
+    configure_logging(args.log_level)
+
+    if args.health:
+        print(
+            json.dumps(
+                build_health_report(db_path=args.db_path),
+                indent=2,
+                ensure_ascii=False,
+            ),
+        )
+        return 0
 
     if args.daily_scores:
         if not args.db_path:
@@ -144,9 +156,9 @@ def main(argv: list[str] | None = None) -> int:
             sampling_strategy=args.sampling_strategy,
         )
 
-    if args.text is None:
+    if args.text is None and not args.health:
         parser.error(
-            "Provide text, --batch PATH, --video PATH, or --daily-scores --db PATH",
+            "Provide text, --batch PATH, --video PATH, --health, or --daily-scores --db PATH",
         )
 
     return _run_single_text(args.text, args.user_id, args.activity_id)

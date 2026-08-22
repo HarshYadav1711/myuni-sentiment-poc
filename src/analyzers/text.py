@@ -10,11 +10,10 @@ import torch
 from scipy.special import softmax
 from transformers import AutoConfig, AutoModelForSequenceClassification, AutoTokenizer
 
+from src.config import DEFAULT_TEXT_MODEL
 from src.schemas import SentimentEvidence, SentimentLabel
 
 logger = logging.getLogger(__name__)
-
-DEFAULT_TEXT_MODEL = "cardiffnlp/twitter-roberta-base-sentiment-latest"
 
 # Canonical label order used for score = P(pos) - P(neg).
 _LABEL_KEYS: tuple[SentimentLabel, ...] = ("negative", "neutral", "positive")

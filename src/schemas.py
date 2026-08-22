@@ -149,10 +149,20 @@ class SpeechAnalysisResult(BaseModel):
         return self.model_dump(mode="json")
 
 
+class PocRuntimeInfo(BaseModel):
+    """Configured models and sampling settings visible in analysis output."""
+
+    models: dict[str, str] = Field(default_factory=dict)
+    video_sampling: Optional[dict[str, Any]] = None
+    fusion_source: Optional[str] = None
+    note: str = "POC evaluation defaults only; not client scoring rules."
+
+
 class AnalysisBlock(BaseModel):
     overall: SentimentEvidence
     modalities: ModalityBundle
     fusion: Optional[FusionDiagnostics] = None
+    runtime: Optional[PocRuntimeInfo] = None
     warnings: list[str] = Field(default_factory=list)
     ocr_text: Optional[str] = Field(
         default=None,

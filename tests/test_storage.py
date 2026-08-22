@@ -139,7 +139,7 @@ def test_duplicate_activity_skipped_idempotent(tmp_path: Path) -> None:
     assert second.summary.processed == 0
     assert second.summary.skipped == 1
     assert second.records[0].status == "skipped"
-    assert "already stored" in (second.records[0].note or "").lower()
+    assert "already processed" in (second.records[0].note or "").lower()
 
     repo = SentimentRepository(db)
     with repo.connection() as conn:
@@ -198,6 +198,39 @@ def test_failed_record_does_not_corrupt_successes(tmp_path: Path) -> None:
     assert len(daily) == 1
     assert daily[0].valid_analysis_count == 2
     assert daily[0].activity_count == 3  # includes failed analysis row
+
+
+def test_failed_activity_can_be_retried(tmp_path: Path) -> None:
+    db = tmp_path / "poc.db"
+    jsonl = tmp_path / "batch.jsonl"
+    rows = [
+        {
+            "activity_id": "RETRY1",
+            "user_id": "U1",
+            "activity_type": "text",
+            "text": "first",
+            "created_at": "2026-08-21T10:00:00+00:00",
+        },
+    ]
+    _write_jsonl(jsonl, rows)
+    pipeline = StubPipeline()
+    pipeline._fail_ids.add("RETRY1")
+    runner = PersistentBatchRunner(db, pipeline=pipeline)
+
+    first = runner.process_file(jsonl)
+    assert first.summary.failed == 1
+    assert first.summary.processed == 0
+
+    pipeline._fail_ids.discard("RETRY1")
+    pipeline._mapping["RETRY1"] = _result("RETRY1", "U1", "positive", 0.6)
+
+    second = runner.process_file(jsonl)
+    assert second.summary.processed == 1
+    assert second.summary.failed == 0
+    assert second.records[0].status == "processed"
+
+    repo = SentimentRepository(db)
+    assert repo.get_analysis("RETRY1")["status"] == "processed"
 
 
 def test_daily_aggregation_helpers() -> None:

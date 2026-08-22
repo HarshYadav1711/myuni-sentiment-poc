@@ -7,6 +7,9 @@ from pathlib import Path
 from typing import Any, Mapping, Optional
 
 
+# Text sentiment (RoBERTa).
+DEFAULT_TEXT_MODEL = "cardiffnlp/twitter-roberta-base-sentiment-latest"
+
 # Exact Hugging Face checkpoint used for zero-shot visual concept scoring.
 DEFAULT_VISUAL_MODEL = "google/siglip2-base-patch16-224"
 
