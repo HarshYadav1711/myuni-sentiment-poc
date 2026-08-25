@@ -12,6 +12,13 @@ from src.analyzers.text import TextSentimentAnalyzer
 from src.analyzers.video import VideoAnalyzer
 from src.config import DEFAULT_FUSION, DEFAULT_VIDEO_SAMPLING, FusionConfig, VideoSamplingConfig
 from src.fusion import fuse_modalities
+from src.routing.input_router import (
+    CLIENT_ENABLED_MODALITIES,
+    CapabilityStatus,
+    InputRouter,
+    InputType,
+    RoutedAnalysisResult,
+)
 from src.runtime_info import build_poc_runtime_info
 from src.schemas import (
     ActivityAnalysisResult,
@@ -84,6 +91,67 @@ class MyUniSentimentPipeline:
     def analyze_speech(self, media_path: object) -> SpeechAnalysisResult:
         """Run the speech branch on an audio/video media path."""
         return self._audio_analyzer.analyze(media_path)  # type: ignore[arg-type]
+
+    def analyze(
+        self,
+        *,
+        text: Optional[str] = None,
+        media_path: Optional[str] = None,
+        mime_type: Optional[str] = None,
+        filename: Optional[str] = None,
+        user_id: Optional[str] = None,
+        activity_id: Optional[str] = None,
+        enabled_modalities: Optional[frozenset[InputType]] = None,
+    ) -> RoutedAnalysisResult:
+        """Unified client entry: detect input type, then route by capability.
+
+        Text uses Twitter-RoBERTa. Image/video return ``not_implemented`` unless
+        explicitly enabled — the client text-baseline does not invent scores.
+        """
+        enabled = CLIENT_ENABLED_MODALITIES if enabled_modalities is None else enabled_modalities
+        try:
+            detected = InputRouter.detect(
+                text=text,
+                media_path=media_path,
+                mime_type=mime_type,
+                filename=filename,
+            )
+        except ValueError as exc:
+            return RoutedAnalysisResult(
+                status=CapabilityStatus.VALIDATION_ERROR,
+                detected_input=None,
+                message=str(exc),
+            )
+
+        if not InputRouter.is_enabled(detected.input_type, enabled):
+            return RoutedAnalysisResult(
+                status=CapabilityStatus.NOT_IMPLEMENTED,
+                detected_input=detected.input_type,
+                message=InputRouter.not_implemented_message(detected.input_type),
+            )
+
+        if detected.input_type == InputType.TEXT:
+            assert detected.text is not None
+            display_name, model_id = InputRouter.text_model_meta()
+            result = self.analyze_text(
+                detected.text,
+                user_id=user_id,
+                activity_id=activity_id,
+            )
+            return RoutedAnalysisResult(
+                status=CapabilityStatus.OK,
+                detected_input=InputType.TEXT,
+                analysis=result,
+                model_display_name=display_name,
+                model_id=model_id,
+            )
+
+        # Future: plug ImageAnalyzer / VideoAnalyzer here when client-enabled.
+        return RoutedAnalysisResult(
+            status=CapabilityStatus.NOT_IMPLEMENTED,
+            detected_input=detected.input_type,
+            message=InputRouter.not_implemented_message(detected.input_type),
+        )
 
     def analyze_text(
         self,

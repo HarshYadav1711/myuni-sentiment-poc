@@ -25,6 +25,15 @@ def format_confidence(confidence: float) -> str:
     return f"{confidence:.3f}"
 
 
+def format_confidence_pct(confidence: float) -> str:
+    """Client-facing confidence as XX.X%."""
+    return f"{confidence * 100:.1f}%"
+
+
+def format_probability_pct(probability: float) -> str:
+    return f"{probability * 100:.1f}%"
+
+
 def evidence_to_dict(ev: Optional[SentimentEvidence]) -> Optional[dict[str, Any]]:
     if ev is None:
         return None
