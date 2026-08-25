@@ -87,9 +87,9 @@ Thin UI over `MyUniSentimentPipeline` — **no duplicated inference**.
 streamlit run app.py
 ```
 
-- Tabs: **Text** · **Image** · **Video**
-- Models load once per session; uploads are deleted after each analysis
-- Sidebar shows FFmpeg / Tesseract / scene-sampling availability
+- Unified input (text / image / audio / video) with automatic type detection
+- Models load lazily on first use per modality; uploads are deleted after each analysis
+- Thin UI over `MyUniSentimentPipeline` — **no duplicated inference**
 
 ## Models & configuration visibility
 
@@ -157,7 +157,7 @@ $env:MYUNI_RUN_VIDEO_INTEGRATION=1; pytest -q -m video_integration
 ## Project layout
 
 ```text
-app.py                          Streamlit demo
+app.py                  Streamlit demo (main UI)
 main.py                         CLI entrypoint
 config/fusion.yaml              POC fusion weights (not client scoring)
 docs/{ARCHITECTURE,DATASETS}.md

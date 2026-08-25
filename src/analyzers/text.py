@@ -10,7 +10,7 @@ import torch
 from scipy.special import softmax
 from transformers import AutoConfig, AutoModelForSequenceClassification, AutoTokenizer
 
-from src.config import DEFAULT_TEXT_MODEL
+from src.config import DEFAULT_TEXT_MODEL, TEXT_CHUNK_SIZE, TEXT_CHUNK_STRIDE, TEXT_MAX_LENGTH
 from src.schemas import SentimentEvidence, SentimentLabel
 
 logger = logging.getLogger(__name__)
@@ -24,15 +24,25 @@ class TextSentimentAnalyzer:
 
     Score convention (POC, not client business scoring):
         score = positive_probability - negative_probability  ∈ [-1, +1]
+
+    Long inputs (transcripts) are split into overlapping token chunks and
+    probability distributions are aggregated with length weighting — the full
+    text is never silently discarded beyond documented chunking.
     """
 
     def __init__(
         self,
         model_name: str = DEFAULT_TEXT_MODEL,
         device: Optional[str] = None,
+        max_length: int = TEXT_MAX_LENGTH,
+        chunk_size: int = TEXT_CHUNK_SIZE,
+        chunk_stride: int = TEXT_CHUNK_STRIDE,
     ) -> None:
         self.model_name = model_name
         self._device_preference = device
+        self.max_length = max_length
+        self.chunk_size = min(chunk_size, max_length)
+        self.chunk_stride = max(1, chunk_stride)
         self._tokenizer = None
         self._model = None
         self._id2label: dict[int, str] = {}
@@ -121,11 +131,60 @@ class TextSentimentAnalyzer:
         assert self._model is not None
         assert self._device is not None
 
+        token_ids = self._tokenizer.encode(cleaned, add_special_tokens=False)
+        if len(token_ids) <= self.max_length - 2:
+            return self._analyze_text_once(cleaned, extra_details=None)
+
+        chunks = self._chunk_token_ids(token_ids)
+        chunk_results: list[tuple[SentimentEvidence, int]] = []
+        for chunk_ids in chunks:
+            chunk_text = self._tokenizer.decode(chunk_ids, skip_special_tokens=True).strip()
+            if not chunk_text:
+                continue
+            evidence = self._analyze_text_once(
+                chunk_text,
+                extra_details={"partial": True},
+            )
+            chunk_results.append((evidence, len(chunk_ids)))
+
+        if not chunk_results:
+            raise ValueError("text produced no scorable chunks after tokenization")
+        return self._aggregate_chunk_results(chunk_results, total_tokens=len(token_ids))
+
+    def _chunk_token_ids(self, token_ids: list[int]) -> list[list[int]]:
+        """Split long token sequences into overlapping chunks (no silent drop)."""
+        if not token_ids:
+            return []
+        usable = self.chunk_size
+        stride = min(self.chunk_stride, usable)
+        chunks: list[list[int]] = []
+        start = 0
+        n = len(token_ids)
+        while start < n:
+            end = min(start + usable, n)
+            chunks.append(token_ids[start:end])
+            if end >= n:
+                break
+            start = max(0, end - stride)
+            if start >= end:
+                start = end
+        return chunks
+
+    def _analyze_text_once(
+        self,
+        cleaned: str,
+        *,
+        extra_details: Optional[dict],
+    ) -> SentimentEvidence:
+        assert self._tokenizer is not None
+        assert self._model is not None
+        assert self._device is not None
+
         encoded = self._tokenizer(
             cleaned,
             return_tensors="pt",
             truncation=True,
-            max_length=512,
+            max_length=self.max_length,
         )
         encoded = {k: v.to(self._device) for k, v in encoded.items()}
 
@@ -138,7 +197,6 @@ class TextSentimentAnalyzer:
             self._id2label[i]: float(probs[i]) for i in range(len(probs))
         }
 
-        # Ensure all three keys exist for a stable score formula.
         for key in _LABEL_KEYS:
             probability_map.setdefault(key, 0.0)
 
@@ -149,11 +207,75 @@ class TextSentimentAnalyzer:
         label = max(_LABEL_KEYS, key=lambda k: probability_map[k])
         confidence = float(probability_map[label])
 
+        details: dict = {"device": str(self._device)}
+        if extra_details:
+            details.update(extra_details)
+
         return SentimentEvidence(
             label=label,
             score=float(np.clip(score, -1.0, 1.0)),
             confidence=confidence,
             probabilities={k: float(probability_map[k]) for k in _LABEL_KEYS},
             model=self.model_name,
-            details={"device": str(self._device)},
+            details=details,
+        )
+
+    def _aggregate_chunk_results(
+        self,
+        chunk_results: list[tuple[SentimentEvidence, int]],
+        *,
+        total_tokens: int,
+    ) -> SentimentEvidence:
+        """Length-weighted average of chunk probability distributions."""
+        if not chunk_results:
+            raise ValueError("No chunks to aggregate")
+        if len(chunk_results) == 1:
+            only, _ = chunk_results[0]
+            return only.model_copy(
+                update={
+                    "details": {
+                        **(only.details or {}),
+                        "chunking": {
+                            "chunks": 1,
+                            "total_tokens": total_tokens,
+                            "method": "single_chunk",
+                        },
+                    },
+                },
+            )
+
+        weight_sum = float(sum(max(w, 1) for _, w in chunk_results))
+        agg = {k: 0.0 for k in _LABEL_KEYS}
+        for evidence, weight in chunk_results:
+            probs = evidence.probabilities or {}
+            w = float(max(weight, 1)) / weight_sum
+            for key in _LABEL_KEYS:
+                agg[key] += w * float(probs.get(key, 0.0))
+
+        total = sum(agg.values()) or 1.0
+        probability_map = {k: float(agg[k] / total) for k in _LABEL_KEYS}
+        label = max(_LABEL_KEYS, key=lambda k: probability_map[k])
+        confidence = float(probability_map[label])
+        score = float(probability_map["positive"] - probability_map["negative"])
+
+        return SentimentEvidence(
+            label=label,
+            score=float(np.clip(score, -1.0, 1.0)),
+            confidence=confidence,
+            probabilities=probability_map,
+            model=self.model_name,
+            details={
+                "device": str(self._device),
+                "chunking": {
+                    "chunks": len(chunk_results),
+                    "total_tokens": total_tokens,
+                    "chunk_size": self.chunk_size,
+                    "chunk_stride": self.chunk_stride,
+                    "method": "length_weighted_probability_average",
+                    "note": (
+                        "Long transcript/text was chunked for RoBERTa's 512-token limit; "
+                        "full text is preserved separately from this aggregate."
+                    ),
+                },
+            },
         )

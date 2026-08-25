@@ -35,12 +35,13 @@ def test_demo_sample_files_when_present_are_valid_media() -> None:
 
 
 def test_compare_app_is_unified_no_mode_selector() -> None:
-    source = (ROOT / "app_compare.py").read_text(encoding="utf-8")
+    source = (ROOT / "app.py").read_text(encoding="utf-8")
     assert "MyUni Sentiment Intelligence" in source
-    assert "Analyze Content" in source
+    assert "Enter your content" in source
+    assert "Sentiment Intelligence" in source
     assert "Content type is detected automatically" in source
     assert "segmented_control" not in source
     assert 'st.radio(' not in source
     assert "get_pipeline" in source
-    assert "demo_assets" in source
+    assert "Demo examples" not in source
     assert "Please analyze one content item at a time" in source

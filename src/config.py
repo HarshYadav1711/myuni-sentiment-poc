@@ -15,10 +15,27 @@ DEFAULT_VISUAL_MODEL = "google/siglip2-base-patch16-224"
 
 # Zero-shot candidate prompts → sentiment labels (transparent, not a trained classifier).
 DEFAULT_VISUAL_PROMPTS: dict[str, str] = {
-    "positive": "a positive and pleasant situation",
-    "neutral": "a neutral everyday situation",
-    "negative": "a negative or unpleasant situation",
+    "positive": "a positive, joyful, pleasant or uplifting social media image",
+    "neutral": "a neutral, ordinary or informational social media image",
+    "negative": "a negative, sad, upsetting, unpleasant or distressing social media image",
 }
+
+# Facial-expression concept prompts (SigLIP zero-shot on face crops / face-gated frames).
+DEFAULT_FACIAL_EXPRESSION_PROMPTS: dict[str, str] = {
+    "positive": "a person or character with a happy smiling facial expression",
+    "neutral": "a person or character with a calm neutral facial expression",
+    "negative": "a person or character with a sad angry or upset facial expression",
+}
+
+# Face presence gate (positive≈face, negative≈no face, neutral≈ambiguous).
+DEFAULT_FACE_GATE_PROMPTS: dict[str, str] = {
+    "positive": "a close-up of a human or character face showing a facial expression",
+    "neutral": "an ambiguous image that may or may not include a face",
+    "negative": "a scene object or landscape with no visible face",
+}
+
+# Minimum SigLIP "face" probability to accept a Haar-miss full-frame expression score.
+FACE_GATE_MIN_PROBABILITY = 0.45
 
 # Minimum alphanumeric characters before OCR text is treated as meaningful.
 OCR_MIN_ALNUM_CHARS = 3
@@ -30,9 +47,18 @@ DEFAULT_ASR_LANGUAGE = "en"
 
 # Video frame sampling. Baseline remains fixed ~1 FPS; scene_keyframe is optional.
 DEFAULT_VIDEO_SAMPLE_FPS = 1.0
-DEFAULT_VIDEO_MAX_FRAMES = 60
+DEFAULT_VIDEO_MAX_FRAMES = 12
 DEFAULT_VIDEO_MAX_OCR_FRAMES = 8
 DEFAULT_VIDEO_SAMPLING_STRATEGY = "fixed_fps"
+
+# Aliases matching the client multimodal milestone naming.
+VIDEO_SAMPLE_FPS = DEFAULT_VIDEO_SAMPLE_FPS
+MAX_VIDEO_FRAMES = DEFAULT_VIDEO_MAX_FRAMES
+
+# RoBERTa max sequence length; longer transcripts are chunked (not silently truncated).
+TEXT_MAX_LENGTH = 512
+TEXT_CHUNK_SIZE = 480
+TEXT_CHUNK_STRIDE = 64
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_FUSION_YAML = _REPO_ROOT / "config" / "fusion.yaml"

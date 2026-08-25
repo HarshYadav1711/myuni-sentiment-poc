@@ -4,14 +4,24 @@ from __future__ import annotations
 
 import logging
 import uuid
+from datetime import datetime, timezone
 from typing import Optional
 
 from src.analyzers.audio import AudioAnalyzer
 from src.analyzers.image import ImageAnalyzer
 from src.analyzers.text import TextSentimentAnalyzer
 from src.analyzers.video import VideoAnalyzer
-from src.config import DEFAULT_FUSION, DEFAULT_VIDEO_SAMPLING, FusionConfig, VideoSamplingConfig
+from src.config import (
+    DEFAULT_FUSION,
+    DEFAULT_TEXT_MODEL,
+    DEFAULT_VIDEO_SAMPLING,
+    DEFAULT_VISUAL_MODEL,
+    DEFAULT_WHISPER_MODEL,
+    FusionConfig,
+    VideoSamplingConfig,
+)
 from src.fusion import fuse_modalities
+from src.media.ffmpeg_utils import FFmpegError, FFmpegNotFoundError
 from src.routing.input_router import (
     CLIENT_ENABLED_MODALITIES,
     CapabilityStatus,
@@ -37,7 +47,8 @@ _PREVIEW_LEN = 120
 class MyUniSentimentPipeline:
     """Routes activities through modality analyzers and returns standardized results.
 
-    Milestone 5: ``text``, ``image``, and ``video`` activities are analyzed.
+    Client ``analyze()`` supports text, image, audio, and video with automatic routing.
+    CLI/batch ``analyze_activity()`` continues to support text/image/video (+ audio).
     """
 
     def __init__(
@@ -103,10 +114,14 @@ class MyUniSentimentPipeline:
         activity_id: Optional[str] = None,
         enabled_modalities: Optional[frozenset[InputType]] = None,
     ) -> RoutedAnalysisResult:
-        """Unified client entry: detect input type, then route by capability.
+        """Unified client entry: detect input type, then route to real analyzers.
 
-        Text uses Twitter-RoBERTa. Image/video return ``not_implemented`` unless
-        explicitly enabled — the client text-baseline does not invent scores.
+        - TEXT → Twitter-RoBERTa
+        - IMAGE → SigLIP 2 zero-shot visual sentiment
+        - AUDIO → faster-whisper → RoBERTa transcript sentiment
+        - VIDEO → frame SigLIP + speech branch, transparent late fusion
+
+        Never invents scores after failures or empty evidence.
         """
         enabled = CLIENT_ENABLED_MODALITIES if enabled_modalities is None else enabled_modalities
         try:
@@ -133,11 +148,19 @@ class MyUniSentimentPipeline:
         if detected.input_type == InputType.TEXT:
             assert detected.text is not None
             display_name, model_id = InputRouter.text_model_meta()
-            result = self.analyze_text(
-                detected.text,
-                user_id=user_id,
-                activity_id=activity_id,
-            )
+            try:
+                result = self.analyze_text(
+                    detected.text,
+                    user_id=user_id,
+                    activity_id=activity_id,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("Text analysis failed")
+                return RoutedAnalysisResult(
+                    status=CapabilityStatus.VALIDATION_ERROR,
+                    detected_input=InputType.TEXT,
+                    message=f"Text analysis failed: {exc}",
+                )
             return RoutedAnalysisResult(
                 status=CapabilityStatus.OK,
                 detected_input=InputType.TEXT,
@@ -146,11 +169,242 @@ class MyUniSentimentPipeline:
                 model_id=model_id,
             )
 
-        # Future: plug ImageAnalyzer / VideoAnalyzer here when client-enabled.
+        if not detected.media_path:
+            return RoutedAnalysisResult(
+                status=CapabilityStatus.VALIDATION_ERROR,
+                detected_input=detected.input_type,
+                message="Upload could not be saved for analysis. Please try again.",
+            )
+
+        resolved_id = activity_id or f"ACT-{uuid.uuid4().hex[:8].upper()}"
+        try:
+            if detected.input_type == InputType.IMAGE:
+                result = self._client_analyze_image(
+                    detected.media_path,
+                    user_id=user_id,
+                    activity_id=resolved_id,
+                )
+                if result.analysis.modalities.visual is None:
+                    return RoutedAnalysisResult(
+                        status=CapabilityStatus.INSUFFICIENT_EVIDENCE,
+                        detected_input=InputType.IMAGE,
+                        message=InputRouter.insufficient_evidence_message(InputType.IMAGE),
+                    )
+                display_name, model_id = InputRouter.visual_model_meta()
+                return RoutedAnalysisResult(
+                    status=CapabilityStatus.OK,
+                    detected_input=InputType.IMAGE,
+                    analysis=result,
+                    model_display_name=display_name,
+                    model_id=model_id,
+                )
+
+            if detected.input_type == InputType.AUDIO:
+                result = self._client_analyze_audio(
+                    detected.media_path,
+                    user_id=user_id,
+                    activity_id=resolved_id,
+                )
+                if result.analysis.modalities.speech is None:
+                    return RoutedAnalysisResult(
+                        status=CapabilityStatus.INSUFFICIENT_EVIDENCE,
+                        detected_input=InputType.AUDIO,
+                        analysis=result,
+                        message=InputRouter.insufficient_evidence_message(InputType.AUDIO),
+                        model_display_name=InputRouter.audio_model_meta()[0],
+                        model_id=DEFAULT_WHISPER_MODEL,
+                    )
+                display_name, model_id = InputRouter.audio_model_meta()
+                return RoutedAnalysisResult(
+                    status=CapabilityStatus.OK,
+                    detected_input=InputType.AUDIO,
+                    analysis=result,
+                    model_display_name=display_name,
+                    model_id=f"{model_id} | {DEFAULT_TEXT_MODEL}",
+                )
+
+            if detected.input_type == InputType.VIDEO:
+                result = self._client_analyze_video(
+                    detected.media_path,
+                    user_id=user_id,
+                    activity_id=resolved_id,
+                )
+                used = list(result.analysis.fusion.contributing_modalities) if result.analysis.fusion else []
+                if not used:
+                    return RoutedAnalysisResult(
+                        status=CapabilityStatus.INSUFFICIENT_EVIDENCE,
+                        detected_input=InputType.VIDEO,
+                        analysis=result,
+                        message=InputRouter.insufficient_evidence_message(InputType.VIDEO),
+                        model_display_name=InputRouter.video_model_meta()[0],
+                        model_id=DEFAULT_VISUAL_MODEL,
+                    )
+                display_name, model_id = InputRouter.video_model_meta()
+                return RoutedAnalysisResult(
+                    status=CapabilityStatus.OK,
+                    detected_input=InputType.VIDEO,
+                    analysis=result,
+                    model_display_name=display_name,
+                    model_id=model_id,
+                )
+        except (FileNotFoundError, ValueError, FFmpegError, FFmpegNotFoundError) as exc:
+            return RoutedAnalysisResult(
+                status=CapabilityStatus.VALIDATION_ERROR,
+                detected_input=detected.input_type,
+                message=str(exc),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("%s analysis failed", detected.input_type.value)
+            return RoutedAnalysisResult(
+                status=CapabilityStatus.VALIDATION_ERROR,
+                detected_input=detected.input_type,
+                message=f"{detected.input_type.value.title()} analysis failed: {exc}",
+            )
+
         return RoutedAnalysisResult(
             status=CapabilityStatus.NOT_IMPLEMENTED,
             detected_input=detected.input_type,
             message=InputRouter.not_implemented_message(detected.input_type),
+        )
+
+    def _new_activity(
+        self,
+        *,
+        activity_type: str,
+        media_path: str,
+        user_id: Optional[str],
+        activity_id: str,
+        text: Optional[str] = None,
+    ) -> ActivityInput:
+        return ActivityInput(
+            activity_id=activity_id,
+            user_id=user_id or "DEMO-USER",
+            activity_type=activity_type,  # type: ignore[arg-type]
+            text=text,
+            media_path=media_path,
+            created_at=datetime.now(timezone.utc),
+        )
+
+    def _client_analyze_image(
+        self,
+        media_path: str,
+        *,
+        user_id: Optional[str],
+        activity_id: str,
+    ) -> ActivityAnalysisResult:
+        activity = self._new_activity(
+            activity_type="image",
+            media_path=media_path,
+            user_id=user_id,
+            activity_id=activity_id,
+        )
+        return self._analyze_image_activity(activity)
+
+    def _client_analyze_audio(
+        self,
+        media_path: str,
+        *,
+        user_id: Optional[str],
+        activity_id: str,
+    ) -> ActivityAnalysisResult:
+        speech = self._audio_analyzer.analyze(media_path)
+        modalities = ModalityBundle(speech=speech.sentiment)
+        if speech.sentiment is not None:
+            fusion = fuse_modalities({"speech": speech.sentiment}, config=self._fusion_config)
+            overall = fusion.overall
+            diagnostics = fusion.diagnostics
+        else:
+            # Explicit insufficient path: do not invent a neutral sentiment label.
+            fusion = fuse_modalities({}, config=self._fusion_config)
+            overall = fusion.overall.model_copy(
+                update={
+                    "details": {
+                        **(fusion.overall.details or {}),
+                        "insufficient_evidence": True,
+                        "reason": "no_speech_or_empty_transcript",
+                    },
+                },
+            )
+            diagnostics = fusion.diagnostics.model_copy(
+                update={
+                    "explanation": (
+                        "No usable speech transcript; overall sentiment not derived "
+                        "from invented scores."
+                    ),
+                    "contributing_modalities": [],
+                },
+            )
+
+        return ActivityAnalysisResult(
+            activity_id=activity_id,
+            user_id=user_id,
+            activity_type="audio",
+            input=InputMetadata(media_path=media_path),
+            analysis=AnalysisBlock(
+                overall=overall,
+                modalities=modalities,
+                fusion=diagnostics,
+                runtime=build_poc_runtime_info(self),
+                warnings=list(speech.warnings),
+                transcript=speech.transcript,
+            ),
+        )
+
+    def _client_analyze_video(
+        self,
+        media_path: str,
+        *,
+        user_id: Optional[str],
+        activity_id: str,
+    ) -> ActivityAnalysisResult:
+        """Client video path: visual + speech late fusion (equal POC weights)."""
+        activity = self._new_activity(
+            activity_type="video",
+            media_path=media_path,
+            user_id=user_id,
+            activity_id=activity_id,
+        )
+        # Reuse frame/ASR analyzers, then fuse visual+speech only for client overall.
+        assert activity.media_path is not None
+        bundle = self._video_analyzer.analyze(activity.media_path)
+        fusion = fuse_modalities(
+            {
+                "visual": bundle.visual,
+                "speech": bundle.speech,
+            },
+            config=self._fusion_config,
+        )
+        used = list(fusion.diagnostics.contributing_modalities)
+        note = fusion.diagnostics.explanation
+        if len(used) == 1:
+            note = (
+                f"Only {used[0]} evidence was usable; POC overall is derived from "
+                f"{used[0]} only. Not a clinically validated fusion formula."
+            )
+        elif len(used) >= 2:
+            note = (
+                "Equal-weight POC late fusion over visual + speech "
+                "(confidence-weighted). Not client business scoring / not clinically validated."
+            )
+        diagnostics = fusion.diagnostics.model_copy(update={"explanation": note})
+
+        return ActivityAnalysisResult(
+            activity_id=activity_id,
+            user_id=user_id,
+            activity_type="video",
+            input=InputMetadata(media_path=media_path),
+            analysis=AnalysisBlock(
+                overall=fusion.overall,
+                modalities=ModalityBundle(
+                    visual=bundle.visual,
+                    speech=bundle.speech,
+                ),
+                fusion=diagnostics,
+                runtime=build_poc_runtime_info(self),
+                warnings=list(bundle.warnings),
+                transcript=bundle.transcript,
+                video=bundle.diagnostics,
+            ),
         )
 
     def analyze_text(
@@ -193,6 +447,13 @@ class MyUniSentimentPipeline:
 
         if activity.activity_type == "video":
             return self._analyze_video_activity(activity)
+
+        if activity.activity_type == "audio":
+            return self._client_analyze_audio(
+                activity.media_path,  # type: ignore[arg-type]
+                user_id=activity.user_id,
+                activity_id=activity.activity_id,
+            )
 
         raise NotImplementedError(
             f"activity_type={activity.activity_type!r} is not implemented yet",

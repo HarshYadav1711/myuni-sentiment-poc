@@ -24,7 +24,7 @@ def test_configured_models_contains_expected_keys() -> None:
 def test_video_sampling_defaults() -> None:
     cfg = video_sampling_defaults()
     assert cfg["fps"] == 1.0
-    assert cfg["max_frames"] == 60
+    assert cfg["max_frames"] == 12
     assert cfg["default_strategy"] == "fixed_fps"
 
 

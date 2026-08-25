@@ -41,20 +41,15 @@ def test_dependency_hint_from_warnings() -> None:
 
 
 def test_app_module_unified_workspace() -> None:
-    """Smoke: mockup-aligned workspace without modality tabs or sample chips."""
+    """Smoke: main Streamlit app stays unified (no modality tabs)."""
     source = (ROOT / "app.py").read_text(encoding="utf-8")
     assert "def get_pipeline" in source
-    assert "def main" in source
-    assert "main()" in source
     assert "Sentiment Intelligence" in source
     assert "Analyze Now" in source
     assert "Enter your content" in source
-    assert "float-card" in source
-    assert "theme_night_toggle" in source
     assert "def tab_text" not in source
     assert 'st.tabs(["Text", "Image", "Video"])' not in source
     assert "SAMPLE_TEXTS" not in source
-    assert "pipeline().analyze(" in source or ".analyze(" in source
-    # Preview may list roadmap items, but live capability is still text sentiment.
+    assert ".analyze(" in source
     assert "Overall Sentiment" in source
     assert "roadmap" in source.lower() or "Live in this build" in source

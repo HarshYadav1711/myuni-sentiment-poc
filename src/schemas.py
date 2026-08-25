@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 SentimentLabel = Literal["positive", "neutral", "negative"]
-ActivityType = Literal["text", "image", "video"]
+ActivityType = Literal["text", "image", "video", "audio"]
 
 # Reserved for future MyUni semantics (post / comment / story). Not enforced yet.
 ContentKind = Literal["post", "comment", "story", "caption", "other"]
@@ -74,7 +74,7 @@ class ActivityInput(BaseModel):
         if self.activity_type == "text":
             if not self.text:
                 raise ValueError("text activities require non-blank text")
-        elif self.activity_type in ("image", "video"):
+        elif self.activity_type in ("image", "video", "audio"):
             if not self.media_path:
                 raise ValueError(
                     f"{self.activity_type} activities require media_path",

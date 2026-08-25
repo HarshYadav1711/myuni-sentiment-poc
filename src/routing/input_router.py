@@ -11,12 +11,13 @@ from enum import Enum
 from pathlib import Path
 from typing import Optional
 
-from src.config import DEFAULT_TEXT_MODEL
+from src.config import DEFAULT_TEXT_MODEL, DEFAULT_VISUAL_MODEL, DEFAULT_WHISPER_MODEL
 
 
 class InputType(str, Enum):
     TEXT = "text"
     IMAGE = "image"
+    AUDIO = "audio"
     VIDEO = "video"
 
 
@@ -24,17 +25,20 @@ class CapabilityStatus(str, Enum):
     OK = "ok"
     NOT_IMPLEMENTED = "not_implemented"
     VALIDATION_ERROR = "validation_error"
+    INSUFFICIENT_EVIDENCE = "insufficient_evidence"
 
 
-# Client text-baseline: only Twitter-RoBERTa text inference is enabled.
-# Image/video analyzer modules may exist in the repo for future wiring, but
-# they are not exposed through the unified client path until enabled here.
-CLIENT_ENABLED_MODALITIES: frozenset[InputType] = frozenset({InputType.TEXT})
+# Client multimodal baseline: text, image, audio, and video analyzers.
+CLIENT_ENABLED_MODALITIES: frozenset[InputType] = frozenset(
+    {InputType.TEXT, InputType.IMAGE, InputType.AUDIO, InputType.VIDEO},
+)
 
 _IMAGE_EXTENSIONS = frozenset({".jpg", ".jpeg", ".png", ".webp", ".bmp"})
+_AUDIO_EXTENSIONS = frozenset({".wav", ".mp3", ".m4a", ".ogg", ".flac"})
 _VIDEO_EXTENSIONS = frozenset({".mp4", ".mov", ".avi", ".webm", ".mkv"})
 
 _IMAGE_MIME_PREFIXES = ("image/",)
+_AUDIO_MIME_PREFIXES = ("audio/",)
 _VIDEO_MIME_PREFIXES = ("video/",)
 
 _IMAGE_MIME_EXACT = frozenset(
@@ -45,6 +49,21 @@ _IMAGE_MIME_EXACT = frozenset(
         "image/webp",
         "image/bmp",
         "image/x-ms-bmp",
+    },
+)
+_AUDIO_MIME_EXACT = frozenset(
+    {
+        "audio/wav",
+        "audio/x-wav",
+        "audio/wave",
+        "audio/mpeg",
+        "audio/mp3",
+        "audio/mp4",
+        "audio/m4a",
+        "audio/x-m4a",
+        "audio/ogg",
+        "audio/flac",
+        "audio/x-flac",
     },
 )
 _VIDEO_MIME_EXACT = frozenset(
@@ -59,14 +78,18 @@ _VIDEO_MIME_EXACT = frozenset(
     },
 )
 
-_NOT_IMPLEMENTED_MESSAGES = {
+_INSUFFICIENT_MESSAGES = {
     InputType.IMAGE: (
-        "Image detected and routed successfully. "
-        "Visual sentiment analysis is not enabled in the current text-baseline build."
+        "Image detected and routed successfully, but no usable visual sentiment "
+        "evidence could be produced for this file."
+    ),
+    InputType.AUDIO: (
+        "Audio detected and routed successfully, but no usable speech transcript "
+        "was produced (no-speech or insufficient text). Sentiment was not invented."
     ),
     InputType.VIDEO: (
-        "Video detected and routed successfully. "
-        "Video sentiment analysis is not enabled in the current text-baseline build."
+        "Video detected and routed successfully, but neither visual nor speech "
+        "evidence was usable. Insufficient evidence for a POC overall sentiment."
     ),
 }
 
@@ -122,7 +145,7 @@ class InputRouter:
         filename: Optional[str] = None,
         media_path: Optional[str] = None,
     ) -> Optional[InputType]:
-        """Return IMAGE/VIDEO from MIME (primary) and extension (secondary), or None."""
+        """Return IMAGE/AUDIO/VIDEO from MIME (primary) and extension (secondary)."""
         mime = cls._normalize_mime(mime_type)
         ext = cls._extension(filename, media_path)
 
@@ -130,12 +153,16 @@ class InputRouter:
         if mime:
             if mime in _IMAGE_MIME_EXACT or mime.startswith(_IMAGE_MIME_PREFIXES):
                 mime_kind = InputType.IMAGE
+            elif mime in _AUDIO_MIME_EXACT or mime.startswith(_AUDIO_MIME_PREFIXES):
+                mime_kind = InputType.AUDIO
             elif mime in _VIDEO_MIME_EXACT or mime.startswith(_VIDEO_MIME_PREFIXES):
                 mime_kind = InputType.VIDEO
 
         ext_kind: Optional[InputType] = None
         if ext in _IMAGE_EXTENSIONS:
             ext_kind = InputType.IMAGE
+        elif ext in _AUDIO_EXTENSIONS:
+            ext_kind = InputType.AUDIO
         elif ext in _VIDEO_EXTENSIONS:
             ext_kind = InputType.VIDEO
 
@@ -143,7 +170,7 @@ class InputRouter:
             raise ValueError(
                 f"File type mismatch: MIME suggests {mime_kind.value}, "
                 f"but extension suggests {ext_kind.value}. "
-                "Please upload a supported image or video file.",
+                "Please upload a supported image, audio, or video file.",
             )
 
         return mime_kind or ext_kind
@@ -181,6 +208,7 @@ class InputRouter:
             raise ValueError(
                 f"Unsupported file type ({label}). "
                 "Supported images: JPG, JPEG, PNG, WEBP. "
+                "Supported audio: WAV, MP3, M4A, OGG, FLAC. "
                 "Supported videos: MP4, MOV, AVI, WEBM, MKV.",
             )
 
@@ -202,12 +230,33 @@ class InputRouter:
 
     @classmethod
     def not_implemented_message(cls, input_type: InputType) -> str:
-        return _NOT_IMPLEMENTED_MESSAGES.get(
+        return (
+            f"{input_type.value.title()} analysis is not enabled in this build."
+        )
+
+    @classmethod
+    def insufficient_evidence_message(cls, input_type: InputType) -> str:
+        return _INSUFFICIENT_MESSAGES.get(
             input_type,
-            f"{input_type.value.title()} analysis is not enabled in this build.",
+            f"Insufficient evidence to score this {input_type.value} input.",
         )
 
     @classmethod
     def text_model_meta(cls) -> tuple[str, str]:
         """Return (display name, exact checkpoint id) for client results."""
         return "Twitter-RoBERTa", DEFAULT_TEXT_MODEL
+
+    @classmethod
+    def visual_model_meta(cls) -> tuple[str, str]:
+        """Return (display name, exact checkpoint id) for visual sentiment."""
+        return "SigLIP 2", DEFAULT_VISUAL_MODEL
+
+    @classmethod
+    def audio_model_meta(cls) -> tuple[str, str]:
+        """Return (display name, ASR id) for audio results."""
+        return "Faster-Whisper + Twitter-RoBERTa", DEFAULT_WHISPER_MODEL
+
+    @classmethod
+    def video_model_meta(cls) -> tuple[str, str]:
+        """Return (display name, primary visual checkpoint) for video results."""
+        return "SigLIP 2 + Faster-Whisper + Twitter-RoBERTa", DEFAULT_VISUAL_MODEL
