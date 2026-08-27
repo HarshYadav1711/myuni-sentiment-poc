@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Mapping, Optional, Union
+from typing import Any, Mapping, Optional, Sequence, Union
 
 import numpy as np
+import spaces
 import torch
 from PIL import Image, UnidentifiedImageError
 from scipy.special import softmax
@@ -20,6 +21,34 @@ PathLike = Union[str, Path]
 _LABEL_KEYS: tuple[SentimentLabel, ...] = ("negative", "neutral", "positive")
 
 
+def _siglip_gpu_duration(input_items: dict[str, Any]) -> int:
+    """Declare a tight ZeroGPU duration so short SigLIP calls are not billed as 60s."""
+    pixel_values = input_items.get("pixel_values")
+    batch = 1
+    if pixel_values is not None and hasattr(pixel_values, "shape") and pixel_values.shape:
+        batch = int(pixel_values.shape[0])
+    return int(min(55, max(15, 10 + batch * 3)))
+
+
+@spaces.GPU(duration=_siglip_gpu_duration)
+def _siglip_gpu_forward(input_items: dict[str, Any]) -> np.ndarray:
+    """SigLIP 2 forward only. Returns CPU logits; never moves RoBERTa or Whisper.
+
+    Off ZeroGPU, ``spaces.GPU`` is a no-op so this runs in-process on the analyzer device.
+    """
+    model = VisualSentimentAnalyzer._gpu_model
+    device = VisualSentimentAnalyzer._gpu_device
+    if model is None or device is None:
+        raise RuntimeError("SigLIP 2 model is not loaded")
+    tensors = {
+        key: value.to(device) if torch.is_tensor(value) else value
+        for key, value in input_items.items()
+    }
+    with torch.no_grad():
+        outputs = model(**tensors)
+        return outputs.logits_per_image.detach().float().cpu().numpy()
+
+
 class VisualSentimentAnalyzer:
     """Lazy SigLIP 2 zero-shot scorer against configurable sentiment concept prompts.
 
@@ -27,6 +56,10 @@ class VisualSentimentAnalyzer:
     the image to short English concept descriptions, then mapping the highest-
     scoring concept to positive / neutral / negative.
     """
+
+    # Class-level handles so the ZeroGPU worker can run forward without pickling ``self``.
+    _gpu_model: Any = None
+    _gpu_device: Optional[torch.device] = None
 
     def __init__(
         self,
@@ -54,6 +87,8 @@ class VisualSentimentAnalyzer:
 
     def load(self) -> None:
         if self.is_loaded:
+            VisualSentimentAnalyzer._gpu_model = self._model
+            VisualSentimentAnalyzer._gpu_device = self._device
             return
 
         from transformers import AutoModel, AutoProcessor
@@ -67,12 +102,15 @@ class VisualSentimentAnalyzer:
         try:
             self._processor = AutoProcessor.from_pretrained(self.model_name)
             # CPU-safe load: no device_map="auto" (avoids accelerate requirement).
+            # Do not use torch.compile (unsupported on Hugging Face ZeroGPU).
             self._model = AutoModel.from_pretrained(self.model_name)
         finally:
             hf_logging.set_verbosity(prev)
 
         self._model.to(self._device)
         self._model.eval()
+        VisualSentimentAnalyzer._gpu_model = self._model
+        VisualSentimentAnalyzer._gpu_device = self._device
         logger.info("Visual model ready on %s", self._device)
 
     @staticmethod
@@ -89,46 +127,20 @@ class VisualSentimentAnalyzer:
         except OSError as exc:
             raise ValueError(f"Failed to open image file: {file_path} ({exc})") from exc
 
-    def analyze_image(self, image: Image.Image) -> SentimentEvidence:
-        """Score an in-memory PIL image against sentiment concept prompts."""
-        self.load()
-        assert self._processor is not None
-        assert self._model is not None
-        assert self._device is not None
-
+    def _evidence_from_logits(self, logits: np.ndarray) -> SentimentEvidence:
+        """Map a single image's concept logits to the existing evidence schema."""
         ordered_labels: list[SentimentLabel] = list(_LABEL_KEYS)
-        texts = [self.prompts[label] for label in ordered_labels]
-
-        # SigLIP 2 training used padding="max_length", max_length=64.
-        inputs = self._processor(
-            text=texts,
-            images=image,
-            padding="max_length",
-            max_length=64,
-            return_tensors="pt",
-        )
-        inputs = {k: v.to(self._device) for k, v in inputs.items()}
-
-        with torch.no_grad():
-            outputs = self._model(**inputs)
-            logits = outputs.logits_per_image[0].detach().float().cpu().numpy()
-
-        # Mutually exclusive label distribution for explainable POC scoring.
         probs = softmax(logits)
-        # Sigmoid similarities are the native SigLIP pairing scores (not exclusive).
         raw_similarities = 1.0 / (1.0 + np.exp(-logits))
-
         probability_map = {
             label: float(probs[i]) for i, label in enumerate(ordered_labels)
         }
         similarity_map = {
             label: float(raw_similarities[i]) for i, label in enumerate(ordered_labels)
         }
-
         score = float(probability_map["positive"] - probability_map["negative"])
         label = max(ordered_labels, key=lambda k: probability_map[k])
         confidence = float(probability_map[label])
-
         return SentimentEvidence(
             label=label,
             score=float(np.clip(score, -1.0, 1.0)),
@@ -142,6 +154,41 @@ class VisualSentimentAnalyzer:
                 "device": str(self._device),
             },
         )
+
+    def analyze_images(self, images: Sequence[Image.Image]) -> list[SentimentEvidence]:
+        """Score one or more PIL images in a single SigLIP forward (one ZeroGPU entry)."""
+        if not images:
+            return []
+        self.load()
+        assert self._processor is not None
+        assert self._model is not None
+        assert self._device is not None
+
+        ordered_labels: list[SentimentLabel] = list(_LABEL_KEYS)
+        texts = [self.prompts[label] for label in ordered_labels]
+        # SigLIP 2 training used padding="max_length", max_length=64.
+        inputs = self._processor(
+            text=texts,
+            images=list(images),
+            padding="max_length",
+            max_length=64,
+            return_tensors="pt",
+        )
+        cpu_inputs = {
+            key: value.detach().cpu() if torch.is_tensor(value) else value
+            for key, value in inputs.items()
+        }
+        logits_batch = _siglip_gpu_forward(cpu_inputs)
+        if logits_batch.ndim == 1:
+            logits_batch = np.expand_dims(logits_batch, axis=0)
+        return [self._evidence_from_logits(row) for row in logits_batch]
+
+    def analyze_image(self, image: Image.Image) -> SentimentEvidence:
+        """Score an in-memory PIL image against sentiment concept prompts."""
+        results = self.analyze_images([image])
+        if not results:
+            raise RuntimeError("SigLIP 2 produced no visual evidence")
+        return results[0]
 
     def analyze_path(self, path: PathLike) -> SentimentEvidence:
         return self.analyze_image(self.load_image(path))

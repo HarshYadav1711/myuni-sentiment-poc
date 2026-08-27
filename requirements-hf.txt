@@ -1,0 +1,20 @@
+# Hugging Face Space dependencies (Python 3.12.12, ZeroGPU).
+# When publishing the Space, this file must be used as root requirements.txt.
+# Do NOT pip-install this file into the local Windows Python 3.13 / torch 2.13 environment.
+#
+# gradio and spaces are provided by the Gradio SDK / ZeroGPU runtime — do not pin them here.
+# Pin sdk_version in README.md instead.
+
+torch==2.11.0
+transformers>=4.45.0,<5.0.0
+safetensors>=0.4.0
+sentencepiece>=0.2.0
+numpy>=1.24.0,<3
+scipy>=1.10.0,<2
+pydantic>=2.0.0,<3
+Pillow>=10.0.0,<12
+pytesseract>=0.3.10,<0.4
+faster-whisper>=1.0.0,<2
+PyYAML>=6.0.0,<7
+scenedetect[opencv]>=0.6.4,<0.7
+opencv-python-headless>=4.8.0,<5

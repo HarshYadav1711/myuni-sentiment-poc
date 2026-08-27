@@ -54,15 +54,9 @@ def test_partial_modality_failure_still_returns_structure(tmp_path: Path) -> Non
     video.write_bytes(b"fake")
 
     image = MagicMock()
-    # First frame OK, second fails inside analyze_path path — we stub extract + analyze.
-    from src.analyzers.image import ImageModalityEvidence
-
-    image.analyze_path.side_effect = [
-        ImageModalityEvidence(visual=_ev("positive", 0.4, 0.7), warnings=["OCR unavailable: x"]),
-        RuntimeError("frame decode glitch"),
-    ]
     image._visual = MagicMock()
-    image._visual.analyze_image.return_value = _ev("neutral", 0.0, 0.5)
+    image._visual.analyze_images.return_value = [_ev("positive", 0.4, 0.7)]
+    image.extract_ocr_evidence.return_value = (None, None, ["OCR unavailable: x"])
 
     audio = MagicMock()
     audio.analyze.side_effect = RuntimeError("no speech backend")
@@ -80,15 +74,15 @@ def test_partial_modality_failure_still_returns_structure(tmp_path: Path) -> Non
     frame2.write_bytes(b"y")
 
     probe = VideoProbeInfo(duration_seconds=2.0, has_video=True, has_audio=True)
+    loaded = MagicMock()
 
     with patch("src.analyzers.video.probe_video", return_value=probe), patch(
         "src.media.samplers.extract_frames_at_fps",
         return_value=[frame1, frame2],
     ), patch(
         "src.analyzers.visual.VisualSentimentAnalyzer.load_image",
-        return_value=MagicMock(),
+        side_effect=[loaded, RuntimeError("frame decode glitch")],
     ):
-        # Force both frames through OCR path so analyze_path is used.
         with patch("src.analyzers.video._ocr_frame_indices", return_value={0, 1}):
             bundle = analyzer.analyze(video)
 
@@ -184,6 +178,8 @@ def test_temp_cleanup(tmp_path: Path) -> None:
 
     image.analyze_path.return_value = ImageModalityEvidence(visual=_ev(), warnings=[])
     image._visual = MagicMock()
+    image._visual.analyze_images.return_value = [_ev()]
+    image.extract_ocr_evidence.return_value = (None, None, [])
     audio = MagicMock()
     audio.analyze.return_value = SpeechAnalysisResult(
         transcript=None,
@@ -208,6 +204,9 @@ def test_temp_cleanup(tmp_path: Path) -> None:
     ), patch(
         "src.media.samplers.extract_frames_at_fps",
         return_value=[frame],
+    ), patch(
+        "src.analyzers.visual.VisualSentimentAnalyzer.load_image",
+        return_value=MagicMock(),
     ), patch("src.analyzers.video._ocr_frame_indices", return_value={0}):
         analyzer.analyze(video)
 

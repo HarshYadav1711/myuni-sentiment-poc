@@ -53,10 +53,10 @@ class TextSentimentAnalyzer:
         return self._model is not None
 
     def _resolve_device(self) -> torch.device:
+        # Twitter-RoBERTa stays on CPU so Hugging Face ZeroGPU quota is reserved
+        # for SigLIP 2. Pass device="cuda" explicitly to override.
         if self._device_preference:
             return torch.device(self._device_preference)
-        if torch.cuda.is_available():
-            return torch.device("cuda")
         return torch.device("cpu")
 
     def _normalize_label(self, raw: str) -> SentimentLabel:

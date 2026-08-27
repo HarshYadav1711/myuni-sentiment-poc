@@ -51,10 +51,12 @@ class ImageAnalyzer:
         image = VisualSentimentAnalyzer.load_image(media_path)
         return self.analyze_image(image)
 
-    def analyze_image(self, image: Image.Image) -> ImageModalityEvidence:
+    def extract_ocr_evidence(
+        self,
+        image: Image.Image,
+    ) -> tuple[Optional[str], Optional[SentimentEvidence], list[str]]:
+        """Optional OCR path. Missing Tesseract never fails visual sentiment."""
         warnings: list[str] = []
-
-        visual = self._visual.analyze_image(image)
         ocr = self._ocr.extract(image)
 
         ocr_text: Optional[str] = None
@@ -88,6 +90,14 @@ class ImageAnalyzer:
                     )
                 except ValueError as exc:
                     warnings.append(f"OCR text could not be scored: {exc}")
+        return ocr_text, ocr_sentiment, warnings
+
+    def analyze_image(self, image: Image.Image) -> ImageModalityEvidence:
+        warnings: list[str] = []
+
+        visual = self._visual.analyze_image(image)
+        ocr_text, ocr_sentiment, ocr_warnings = self.extract_ocr_evidence(image)
+        warnings.extend(ocr_warnings)
 
         logger.info(
             "Image analysis complete visual=%s ocr_chars=%s warnings=%s",

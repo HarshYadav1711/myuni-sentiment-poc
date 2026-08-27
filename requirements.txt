@@ -1,3 +1,7 @@
+# Local development dependencies.
+# Tested with Windows / Python 3.13 / torch 2.13+cpu.
+# Do not use this file as the Hugging Face Space requirements.txt.
+# Space install file: requirements-hf.txt (Python 3.12.12, torch==2.11.0, ZeroGPU).
 torch>=2.0.0,<3
 transformers>=4.45.0,<5.0.0
 numpy>=1.24.0,<3
@@ -10,5 +14,7 @@ PyYAML>=6.0.0,<7
 scenedetect[opencv]>=0.6.4,<0.7
 opencv-python-headless>=4.8.0,<5
 streamlit>=1.32.0,<2
-starlette>=0.40.0,<0.46.0
+gradio>=4.44.0,<6
+spaces>=0.30.0
+starlette>=0.40.0,<1
 pytest>=8.0.0,<9

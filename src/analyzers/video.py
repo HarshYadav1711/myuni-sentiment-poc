@@ -154,6 +154,33 @@ class VideoAnalyzer:
             max_ocr = self.sampling.max_ocr_frames
             ocr_indices = _ocr_frame_indices(len(frame_paths), max_ocr)
 
+            from src.analyzers.visual import VisualSentimentAnalyzer
+
+            loaded_frames: list[object] = [None] * len(frame_paths)
+            frame_errors: dict[int, str] = {}
+            for idx, frame_path in enumerate(frame_paths):
+                try:
+                    loaded_frames[idx] = VisualSentimentAnalyzer.load_image(frame_path)
+                except Exception as exc:  # noqa: BLE001
+                    frame_errors[idx] = str(exc)
+
+            ok_indices = [i for i, img in enumerate(loaded_frames) if img is not None]
+            visual_by_idx: dict[int, SentimentEvidence] = {}
+            if ok_indices:
+                try:
+                    scored = self._image._visual.analyze_images(
+                        [loaded_frames[i] for i in ok_indices],  # type: ignore[list-item]
+                    )
+                    if len(scored) != len(ok_indices):
+                        raise RuntimeError(
+                            f"visual batch size mismatch ({len(scored)} vs {len(ok_indices)})",
+                        )
+                    visual_by_idx = dict(zip(ok_indices, scored))
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Batch visual scoring failed: %s", exc)
+                    for idx in ok_indices:
+                        frame_errors[idx] = str(exc)
+
             frame_visuals: list[SentimentEvidence] = []
             ocr_sentiments: list[SentimentEvidence] = []
             ocr_texts: list[str] = []
@@ -163,26 +190,34 @@ class VideoAnalyzer:
 
             for idx, frame_path in enumerate(frame_paths):
                 ts = timestamps[idx] if idx < len(timestamps) else None
+                visual = visual_by_idx.get(idx)
+                if visual is None:
+                    err = frame_errors.get(idx, "no visual evidence")
+                    msg = f"frame[{idx}] analysis failed: {err}"
+                    warnings.append(msg)
+                    logger.warning("%s", msg)
+                    if self.debug:
+                        frame_debug.append(
+                            VideoFrameDebug(
+                                index=idx,
+                                timestamp_seconds=ts,
+                                error=str(err),
+                            ),
+                        )
+                    continue
                 try:
-                    from src.analyzers.image import ImageModalityEvidence
-                    from src.analyzers.visual import VisualSentimentAnalyzer
-
+                    ocr_text = None
+                    ocr_sentiment = None
+                    frame_warnings: list[str] = []
                     if idx in ocr_indices:
-                        evidence = self._image.analyze_path(frame_path)
-                    else:
-                        image = VisualSentimentAnalyzer.load_image(frame_path)
-                        visual = self._image._visual.analyze_image(image)
-                        evidence = ImageModalityEvidence(
-                            visual=visual,
-                            ocr_text=None,
-                            ocr_sentiment=None,
-                            warnings=[],
+                        ocr_text, ocr_sentiment, frame_warnings = (
+                            self._image.extract_ocr_evidence(loaded_frames[idx])  # type: ignore[arg-type]
                         )
 
-                    frame_visuals.append(evidence.visual)
+                    frame_visuals.append(visual)
                     frames_analyzed += 1
 
-                    for w in evidence.warnings:
+                    for w in frame_warnings:
                         if "OCR unavailable" in w:
                             if not ocr_unavailable_noted:
                                 warnings.append(w)
@@ -190,20 +225,20 @@ class VideoAnalyzer:
                         elif "OCR returned no text" not in w and w not in warnings:
                             warnings.append(f"frame[{idx}]: {w}")
 
-                    if evidence.ocr_text and is_meaningful_ocr_text(evidence.ocr_text):
-                        ocr_texts.append(evidence.ocr_text)
-                    if evidence.ocr_sentiment is not None:
-                        ocr_sentiments.append(evidence.ocr_sentiment)
+                    if ocr_text and is_meaningful_ocr_text(ocr_text):
+                        ocr_texts.append(ocr_text)
+                    if ocr_sentiment is not None:
+                        ocr_sentiments.append(ocr_sentiment)
 
                     if self.debug:
                         frame_debug.append(
                             VideoFrameDebug(
                                 index=idx,
                                 timestamp_seconds=ts,
-                                visual_label=evidence.visual.label,
-                                visual_score=evidence.visual.score,
-                                visual_confidence=evidence.visual.confidence,
-                                ocr_preview=(evidence.ocr_text or "")[:80] or None,
+                                visual_label=visual.label,
+                                visual_score=visual.score,
+                                visual_confidence=visual.confidence,
+                                ocr_preview=(ocr_text or "")[:80] or None,
                             ),
                         )
                 except Exception as exc:  # noqa: BLE001

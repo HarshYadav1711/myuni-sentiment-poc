@@ -49,6 +49,8 @@ htmlcov/
 *.pt
 *.pth
 *.onnx
+*.safetensors
+*.ckpt
 
 # Runtime outputs (keep directory via .gitkeep)
 outputs/*

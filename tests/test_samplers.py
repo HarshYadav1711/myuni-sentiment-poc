@@ -218,6 +218,16 @@ def test_video_analyzer_uses_injected_sampler(tmp_path: Path) -> None:
         warnings=[],
     )
     image._visual = MagicMock()
+    image._visual.analyze_images.return_value = [
+        SentimentEvidence(
+            label="neutral",
+            score=0.0,
+            confidence=0.5,
+            probabilities={"negative": 0.2, "neutral": 0.6, "positive": 0.2},
+            model="stub",
+        ),
+    ]
+    image.extract_ocr_evidence.return_value = (None, None, [])
     audio = MagicMock()
     audio.analyze.return_value = SpeechAnalysisResult(
         transcript=None,
@@ -235,6 +245,9 @@ def test_video_analyzer_uses_injected_sampler(tmp_path: Path) -> None:
     with patch("src.analyzers.video.probe_video", return_value=probe), patch(
         "src.analyzers.video._ocr_frame_indices",
         return_value={0},
+    ), patch(
+        "src.analyzers.visual.VisualSentimentAnalyzer.load_image",
+        return_value=MagicMock(),
     ):
         bundle = analyzer.analyze(video)
 
