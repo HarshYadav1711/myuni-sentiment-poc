@@ -53,10 +53,7 @@ class TextSentimentAnalyzer:
         return self._model is not None
 
     def _resolve_device(self) -> torch.device:
-        # Twitter-RoBERTa stays on CPU so Hugging Face ZeroGPU quota is reserved
-        # for SigLIP 2. Pass device="cuda" explicitly to override.
-        if self._device_preference:
-            return torch.device(self._device_preference)
+        # Always CPU. ZeroGPU advertises a GPU as available; text must not follow that.
         return torch.device("cpu")
 
     def _normalize_label(self, raw: str) -> SentimentLabel:
@@ -83,7 +80,7 @@ class TextSentimentAnalyzer:
             return
 
         logger.info("Loading text sentiment model: %s", self.model_name)
-        self._device = self._resolve_device()
+        self._device = torch.device("cpu")
 
         # CardiffNLP checkpoints commonly emit an unused-pooler warning; keep CLI quiet.
         from transformers.utils import logging as hf_logging
@@ -99,7 +96,7 @@ class TextSentimentAnalyzer:
         finally:
             hf_logging.set_verbosity(prev_verbosity)
 
-        self._model.to(self._device)
+        self._model.to("cpu")
         self._model.eval()
 
         self._id2label = {
@@ -186,7 +183,7 @@ class TextSentimentAnalyzer:
             truncation=True,
             max_length=self.max_length,
         )
-        encoded = {k: v.to(self._device) for k, v in encoded.items()}
+        encoded = {k: v.to("cpu") for k, v in encoded.items()}
 
         with torch.no_grad():
             outputs = self._model(**encoded)
@@ -207,7 +204,7 @@ class TextSentimentAnalyzer:
         label = max(_LABEL_KEYS, key=lambda k: probability_map[k])
         confidence = float(probability_map[label])
 
-        details: dict = {"device": str(self._device)}
+        details: dict = {"device": "cpu"}
         if extra_details:
             details.update(extra_details)
 
@@ -265,7 +262,7 @@ class TextSentimentAnalyzer:
             probabilities=probability_map,
             model=self.model_name,
             details={
-                "device": str(self._device),
+                "device": "cpu",
                 "chunking": {
                     "chunks": len(chunk_results),
                     "total_tokens": total_tokens,

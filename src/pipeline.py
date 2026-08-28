@@ -7,6 +7,8 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
+import spaces  # ZeroGPU patch before analyzer modules import torch
+
 from src.analyzers.audio import AudioAnalyzer
 from src.analyzers.image import ImageAnalyzer
 from src.analyzers.text import TextSentimentAnalyzer

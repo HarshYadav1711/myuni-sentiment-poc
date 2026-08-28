@@ -58,6 +58,12 @@ def test_gradio_entrypoint_exists_and_uses_pipeline() -> None:
     assert "MyUniSentimentPipeline" in source
     assert "@spaces.GPU" not in source
     assert "st.tabs" not in source
+    spaces_idx = source.find("import spaces")
+    pipeline_idx = source.find("from src.pipeline")
+    assert spaces_idx != -1 and pipeline_idx != -1
+    assert spaces_idx < pipeline_idx
+    get_pipeline_block = source.split("def get_pipeline", 1)[1].split("def ", 1)[0]
+    assert "_visual.load" not in get_pipeline_block
 
 
 def test_streamlit_app_still_present() -> None:

@@ -13,13 +13,15 @@ import sys
 from pathlib import Path
 from typing import Any, Optional
 
-import gradio as gr
-
 ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.pipeline import MyUniSentimentPipeline
+# ZeroGPU: spaces must monkey-patch torch BEFORE any CUDA-touching import.
+import spaces  # noqa: E402
+import gradio as gr  # noqa: E402
+
+from src.pipeline import MyUniSentimentPipeline  # noqa: E402
 from src.routing.input_router import CapabilityStatus
 from src.ui.gradio_view import (
     BOTH_INPUTS_MESSAGE,
@@ -85,14 +87,14 @@ CSS = """
 
 
 def get_pipeline() -> MyUniSentimentPipeline:
-    """Shared pipeline singleton. Same ML core as Streamlit/CLI."""
+    """Shared pipeline singleton. Same ML core as Streamlit/CLI.
+
+    Must not load or move SigLIP during a text request. ZeroGPU packing of
+    SigLIP happens at module import when SPACE_ID is set, not here.
+    """
     global _pipeline
     if _pipeline is None:
         _pipeline = MyUniSentimentPipeline()
-        # On Hugging Face, place SigLIP 2 on CUDA at startup (ZeroGPU packing).
-        # RoBERTa and faster-whisper stay on CPU and are not warmed here.
-        if os.environ.get("SPACE_ID"):
-            _pipeline.image_analyzer._visual.load()
     return _pipeline
 
 
@@ -243,6 +245,10 @@ def build_demo() -> gr.Blocks:
 
 demo = build_demo()
 demo.queue(max_size=8, default_concurrency_limit=1)
+
+# Module-scope SigLIP packing (ZeroGPU-supported). Not invoked by text analysis.
+if os.environ.get("SPACE_ID"):
+    get_pipeline().image_analyzer._visual.load()
 
 if __name__ == "__main__":
     demo.launch()

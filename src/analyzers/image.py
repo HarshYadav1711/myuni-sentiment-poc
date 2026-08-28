@@ -10,8 +10,8 @@ from typing import Optional, Union
 from PIL import Image
 
 from src.analyzers.ocr import OcrExtractor, is_meaningful_ocr_text
-from src.analyzers.text import TextSentimentAnalyzer
 from src.analyzers.visual import VisualSentimentAnalyzer
+from src.analyzers.text import TextSentimentAnalyzer
 from src.config import OCR_MIN_ALNUM_CHARS
 from src.schemas import SentimentEvidence
 
