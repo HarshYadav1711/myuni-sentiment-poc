@@ -18,6 +18,10 @@ def pytest_configure(config: pytest.Config) -> None:
         "markers",
         "video_integration: optional end-to-end video smoke (opt-in via MYUNI_RUN_VIDEO_INTEGRATION=1)",
     )
+    config.addinivalue_line(
+        "markers",
+        "qwen_integration: optional Qwen temporal reasoner (opt-in via MYUNI_RUN_QWEN_INTEGRATION=1)",
+    )
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
@@ -31,6 +35,10 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
         (
             "video_integration",
             "optional video integration (run: pytest -m video_integration with MYUNI_RUN_VIDEO_INTEGRATION=1)",
+        ),
+        (
+            "qwen_integration",
+            "optional Qwen reasoner integration (run: pytest -m qwen_integration with MYUNI_RUN_QWEN_INTEGRATION=1)",
         ),
     ]
     for marker_name, reason in skip_rules:

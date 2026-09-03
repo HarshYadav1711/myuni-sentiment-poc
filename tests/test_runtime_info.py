@@ -29,8 +29,18 @@ def test_runtime_info_from_pipeline_stub() -> None:
     pipeline.video_analyzer.sampling.fps = 1.0
     pipeline.video_analyzer.sampling.max_frames = 60
     pipeline.video_analyzer.sampling.max_ocr_frames = 8
+    pipeline.video_analyzer.temporal_config.window_seconds = 5.0
+    pipeline.video_analyzer.temporal_reasoner_config.model_id = "Qwen/Qwen3-1.7B"
 
     info = build_poc_runtime_info(pipeline)
     assert info.models["text"] == "text-model"
     assert info.models["asr"] == "whisper-model"
+    assert info.models["temporal_reasoner"] == "Qwen/Qwen3-1.7B"
     assert info.video_sampling["strategy"] == "fixed_fps"
+    assert info.video_sampling["temporal_window_seconds"] == 5.0
+
+
+def test_runtime_info_defaults_include_temporal_window() -> None:
+    info = build_poc_runtime_info()
+    assert info.video_sampling is not None
+    assert info.video_sampling["temporal_window_seconds"] == 5.0

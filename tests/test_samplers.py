@@ -186,6 +186,7 @@ def test_scene_midpoint_from_scene_bounds() -> None:
 def test_video_analyzer_uses_injected_sampler(tmp_path: Path) -> None:
     from src.analyzers.image import ImageModalityEvidence
     from src.analyzers.video import VideoAnalyzer
+    from src.config import TemporalReasonerConfig
     from src.media.ffmpeg_utils import VideoProbeInfo
     from src.schemas import SentimentEvidence, SpeechAnalysisResult
 
@@ -240,6 +241,7 @@ def test_video_analyzer_uses_injected_sampler(tmp_path: Path) -> None:
         image_analyzer=image,
         audio_analyzer=audio,
         frame_sampler=StubSampler(),  # type: ignore[arg-type]
+        temporal_reasoner_config=TemporalReasonerConfig(enabled=False),
     )
     probe = VideoProbeInfo(duration_seconds=2.0, has_video=True, has_audio=True)
     with patch("src.analyzers.video.probe_video", return_value=probe), patch(

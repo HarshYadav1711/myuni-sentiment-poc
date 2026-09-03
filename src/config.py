@@ -55,6 +55,69 @@ DEFAULT_VIDEO_SAMPLING_STRATEGY = "fixed_fps"
 VIDEO_SAMPLE_FPS = DEFAULT_VIDEO_SAMPLE_FPS
 MAX_VIDEO_FRAMES = DEFAULT_VIDEO_MAX_FRAMES
 
+# ---------------------------------------------------------------------------
+# Temporal context (Phase 1) — CPU-only structure over existing modality evidence.
+# ---------------------------------------------------------------------------
+
+# Fixed window length in seconds for temporal bucketing.
+TEMPORAL_WINDOW_SECONDS = 5.0
+
+# A window (or modality) is "meaningfully negative" when P(negative) >= this.
+TEMPORAL_NEGATIVE_PROB_THRESHOLD = 0.45
+
+# A window is "meaningfully positive" when P(positive) >= this.
+TEMPORAL_POSITIVE_PROB_THRESHOLD = 0.45
+
+# Minimum max(P(label)) across aggregated evidence for a window to be "usable".
+TEMPORAL_MIN_USABLE_EVIDENCE = 0.30
+
+# Sudden negative change: ΔP(negative) between consecutive usable windows.
+TEMPORAL_SUDDEN_NEGATIVE_DELTA = 0.25
+
+# Cross-modal conflict: each conflicting modality must have |score| >= this
+# and confidence >= TEMPORAL_CROSS_MODAL_MIN_CONFIDENCE.
+TEMPORAL_CROSS_MODAL_MIN_POLARITY = 0.35
+TEMPORAL_CROSS_MODAL_MIN_CONFIDENCE = 0.40
+
+# Trajectory: OLS slope of P(negative) vs *normalized* usable-timeline position
+# in [0, 1] (first usable center → 0, last → 1). Slope ≈ ΔP(neg) over the
+# observed usable timeline; |slope| below this → treated as flat (stable_*).
+TEMPORAL_TRAJECTORY_SLOPE_THRESHOLD = 0.05
+
+# Cap detailed events in default JSON (full list retained in technical details
+# when include_all_events=True on the builder).
+TEMPORAL_MAX_EVENTS_IN_OUTPUT = 48
+
+# ---------------------------------------------------------------------------
+# Temporal context reasoner (Phase 2) — text LLM over structured temporal evidence.
+# ---------------------------------------------------------------------------
+
+TEMPORAL_REASONER_ENABLED = True
+TEMPORAL_REASONER_MODEL = "Qwen/Qwen3-1.7B"
+# Explicit device only — never inferred from torch.cuda.is_available() (ZeroGPU).
+TEMPORAL_REASONER_DEVICE = "cpu"
+TEMPORAL_REASONER_MAX_NEW_TOKENS = 768
+TEMPORAL_REASONER_TEMPERATURE = 0.0
+TEMPORAL_REASONER_TOP_P = 1.0
+TEMPORAL_REASONER_TOP_K = 0
+TEMPORAL_REASONER_SEED = 0
+TEMPORAL_REASONER_MAX_WINDOWS = 12
+TEMPORAL_REASONER_MAX_EVIDENCE_ITEMS = 16
+TEMPORAL_REASONER_MAX_RETRIES = 1
+# Disable Qwen3 extended thinking for deterministic structured JSON POC.
+TEMPORAL_REASONER_ENABLE_THINKING = False
+
+# Evaluation-friendly Qwen non-thinking decoding profile for later comparisons.
+TEMPORAL_REASONER_EVAL_TEMPERATURE = 0.7
+TEMPORAL_REASONER_EVAL_TOP_P = 0.8
+TEMPORAL_REASONER_EVAL_TOP_K = 20
+TEMPORAL_REASONER_EVAL_SEED = 42
+TEMPORAL_REASONER_EVAL_DO_SAMPLE = True
+
+# Candidate model IDs for Phase 3B-A comparison (4B must not be downloaded locally).
+TEMPORAL_REASONER_CANDIDATE_1_7B = "Qwen/Qwen3-1.7B"
+TEMPORAL_REASONER_CANDIDATE_4B = "Qwen/Qwen3-4B-Instruct-2507"
+
 # RoBERTa max sequence length; longer transcripts are chunked (not silently truncated).
 TEXT_MAX_LENGTH = 512
 TEXT_CHUNK_SIZE = 480
@@ -80,6 +143,102 @@ class VideoSamplingConfig:
         if expected <= self.max_frames:
             return self.fps
         return max(self.max_frames / duration_seconds, 1e-6)
+
+
+@dataclass(frozen=True)
+class TemporalConfig:
+    """Deterministic temporal-context settings (CPU logic; no LLM).
+
+    All thresholds are documented POC evaluation defaults — not clinical rules.
+    """
+
+    window_seconds: float = TEMPORAL_WINDOW_SECONDS
+    negative_prob_threshold: float = TEMPORAL_NEGATIVE_PROB_THRESHOLD
+    positive_prob_threshold: float = TEMPORAL_POSITIVE_PROB_THRESHOLD
+    min_usable_evidence: float = TEMPORAL_MIN_USABLE_EVIDENCE
+    sudden_negative_delta: float = TEMPORAL_SUDDEN_NEGATIVE_DELTA
+    cross_modal_min_polarity: float = TEMPORAL_CROSS_MODAL_MIN_POLARITY
+    cross_modal_min_confidence: float = TEMPORAL_CROSS_MODAL_MIN_CONFIDENCE
+    trajectory_slope_threshold: float = TEMPORAL_TRAJECTORY_SLOPE_THRESHOLD
+    max_events_in_output: int = TEMPORAL_MAX_EVENTS_IN_OUTPUT
+
+    def __post_init__(self) -> None:
+        if self.window_seconds <= 0:
+            raise ValueError("window_seconds must be > 0")
+
+
+@dataclass(frozen=True)
+class TemporalReasonerConfig:
+    """Text LLM contextual reasoner settings (additive; never replaces fusion).
+
+    Device must be explicit. Do not select CUDA from torch.cuda.is_available()
+    because Hugging Face ZeroGPU deployments have special CUDA semantics.
+    """
+
+    enabled: bool = TEMPORAL_REASONER_ENABLED
+    model_id: str = TEMPORAL_REASONER_MODEL
+    device: str = TEMPORAL_REASONER_DEVICE
+    max_new_tokens: int = TEMPORAL_REASONER_MAX_NEW_TOKENS
+    temperature: float = TEMPORAL_REASONER_TEMPERATURE
+    top_p: float = TEMPORAL_REASONER_TOP_P
+    top_k: int = TEMPORAL_REASONER_TOP_K
+    seed: int = TEMPORAL_REASONER_SEED
+    max_windows: int = TEMPORAL_REASONER_MAX_WINDOWS
+    max_evidence_items: int = TEMPORAL_REASONER_MAX_EVIDENCE_ITEMS
+    max_retries: int = TEMPORAL_REASONER_MAX_RETRIES
+    enable_thinking: bool = TEMPORAL_REASONER_ENABLE_THINKING
+    # When None, do_sample is inferred from temperature/top_p/top_k.
+    # Set explicitly True for evaluation sampling profiles so Transformers
+    # does not ignore temperature/top_p/top_k under greedy decoding.
+    do_sample: Optional[bool] = None
+
+    def __post_init__(self) -> None:
+        if self.max_new_tokens <= 0:
+            raise ValueError("max_new_tokens must be > 0")
+        if self.max_windows <= 0:
+            raise ValueError("max_windows must be > 0")
+        if self.max_evidence_items <= 0:
+            raise ValueError("max_evidence_items must be > 0")
+        if self.max_retries < 0:
+            raise ValueError("max_retries must be >= 0")
+        if not (0.0 <= self.temperature <= 2.0):
+            raise ValueError("temperature must be in [0, 2]")
+        if not (0.0 < self.top_p <= 1.0):
+            raise ValueError("top_p must be in (0, 1]")
+        if self.top_k < 0:
+            raise ValueError("top_k must be >= 0")
+        if self.seed < 0:
+            raise ValueError("seed must be >= 0")
+        if self.do_sample is not None and not isinstance(self.do_sample, bool):
+            raise ValueError("do_sample must be bool or None")
+
+
+def evaluation_reasoner_config(
+    model_id: str = TEMPORAL_REASONER_CANDIDATE_1_7B,
+    *,
+    device: str = TEMPORAL_REASONER_DEVICE,
+    **overrides: Any,
+) -> TemporalReasonerConfig:
+    """Benchmark / evaluation decoding profile (explicit sampling).
+
+    Uses fixed seed for reproducibility of *seeded sampling*. This does not
+    make sampling deterministic across hardware/backends — seed is recorded.
+    """
+    base = dict(
+        enabled=True,
+        model_id=model_id,
+        device=device,
+        temperature=TEMPORAL_REASONER_EVAL_TEMPERATURE,
+        top_p=TEMPORAL_REASONER_EVAL_TOP_P,
+        top_k=TEMPORAL_REASONER_EVAL_TOP_K,
+        seed=TEMPORAL_REASONER_EVAL_SEED,
+        do_sample=TEMPORAL_REASONER_EVAL_DO_SAMPLE,
+        enable_thinking=False,
+        max_new_tokens=TEMPORAL_REASONER_MAX_NEW_TOKENS,
+        max_retries=TEMPORAL_REASONER_MAX_RETRIES,
+    )
+    base.update(overrides)
+    return TemporalReasonerConfig(**base)
 
 
 @dataclass(frozen=True)
@@ -188,3 +347,5 @@ def load_fusion_config(path: Optional[Path] = None) -> FusionConfig:
 
 DEFAULT_FUSION = load_fusion_config()
 DEFAULT_VIDEO_SAMPLING = VideoSamplingConfig()
+DEFAULT_TEMPORAL = TemporalConfig()
+DEFAULT_TEMPORAL_REASONER = TemporalReasonerConfig()

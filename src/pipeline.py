@@ -15,11 +15,13 @@ from src.analyzers.text import TextSentimentAnalyzer
 from src.analyzers.video import VideoAnalyzer
 from src.config import (
     DEFAULT_FUSION,
+    DEFAULT_TEMPORAL_REASONER,
     DEFAULT_TEXT_MODEL,
     DEFAULT_VIDEO_SAMPLING,
     DEFAULT_VISUAL_MODEL,
     DEFAULT_WHISPER_MODEL,
     FusionConfig,
+    TemporalReasonerConfig,
     VideoSamplingConfig,
 )
 from src.fusion import fuse_modalities
@@ -63,6 +65,7 @@ class MyUniSentimentPipeline:
         video_sampling: VideoSamplingConfig = DEFAULT_VIDEO_SAMPLING,
         video_sampling_strategy: str = "fixed_fps",
         video_debug: bool = False,
+        temporal_reasoner_config: TemporalReasonerConfig = DEFAULT_TEMPORAL_REASONER,
     ) -> None:
         self._text_analyzer = text_analyzer or TextSentimentAnalyzer()
         self._image_analyzer = image_analyzer or ImageAnalyzer(
@@ -81,6 +84,7 @@ class MyUniSentimentPipeline:
             sampling=video_sampling,
             sampling_strategy=video_sampling_strategy,
             fusion_config=fusion_config,
+            temporal_reasoner_config=temporal_reasoner_config,
             debug=video_debug,
         )
         self._video_analyzer.set_text_analyzer(self._text_analyzer)
@@ -406,6 +410,14 @@ class MyUniSentimentPipeline:
                 warnings=list(bundle.warnings),
                 transcript=bundle.transcript,
                 video=bundle.diagnostics,
+                temporal_context=bundle.temporal_context,
+                deterministic_context=getattr(bundle, "deterministic_context", None),
+                temporal_reasoning=getattr(bundle, "temporal_reasoning", None),
+                temporal_reasoner_diagnostics=getattr(
+                    bundle,
+                    "temporal_reasoner_diagnostics",
+                    None,
+                ),
             ),
         )
 
@@ -652,5 +664,13 @@ class MyUniSentimentPipeline:
                 ocr_text=bundle.ocr_text,
                 transcript=bundle.transcript,
                 video=bundle.diagnostics,
+                temporal_context=bundle.temporal_context,
+                deterministic_context=getattr(bundle, "deterministic_context", None),
+                temporal_reasoning=getattr(bundle, "temporal_reasoning", None),
+                temporal_reasoner_diagnostics=getattr(
+                    bundle,
+                    "temporal_reasoner_diagnostics",
+                    None,
+                ),
             ),
         )

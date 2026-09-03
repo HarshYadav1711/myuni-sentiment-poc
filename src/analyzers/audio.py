@@ -15,7 +15,7 @@ from src.config import (
     DEFAULT_WHISPER_MODEL,
 )
 from src.media.ffmpeg_utils import FFmpegError, FFmpegNotFoundError, extract_audio_wav
-from src.schemas import SentimentEvidence, SpeechAnalysisResult, SpeechSegment
+from src.schemas import SentimentEvidence, SpeechAnalysisResult, SpeechSegment, SpeechWord
 
 logger = logging.getLogger(__name__)
 
@@ -81,11 +81,20 @@ class AudioAnalyzer:
         )
         logger.info("ASR model ready: %s", self.whisper_model_name)
 
-    def analyze(self, media_path: PathLike) -> SpeechAnalysisResult:
+    def analyze(
+        self,
+        media_path: PathLike,
+        *,
+        word_timestamps: bool = False,
+    ) -> SpeechAnalysisResult:
         """Extract audio if needed, transcribe, and optionally score transcript sentiment.
 
         Never fabricates transcript text. Empty / no-speech media returns warnings
         and omits speech sentiment.
+
+        ``word_timestamps`` requests Faster-Whisper word-level timings in the
+        *same* transcription pass (no second Whisper call). Audio-only callers
+        default to False; the video temporal path may enable True.
         """
         source = self.validate_media_path(media_path)
         warnings: list[str] = []
@@ -115,12 +124,22 @@ class AudioAnalyzer:
                 str(wav_path),
                 language=self.language,
                 vad_filter=True,
+                word_timestamps=bool(word_timestamps),
             )
             segments: list[SpeechSegment] = []
+            words: list[SpeechWord] = []
             text_parts: list[str] = []
+            word_index = 0
             for seg in segments_iter:
                 text = (seg.text or "").strip()
                 if not text:
+                    # Still harvest word timings if present on empty-text segments.
+                    if word_timestamps:
+                        word_index = self._extend_words_from_segment(
+                            seg,
+                            words,
+                            word_index=word_index,
+                        )
                     continue
                 segments.append(
                     SpeechSegment(
@@ -130,6 +149,12 @@ class AudioAnalyzer:
                     ),
                 )
                 text_parts.append(text)
+                if word_timestamps:
+                    word_index = self._extend_words_from_segment(
+                        seg,
+                        words,
+                        word_index=word_index,
+                    )
             transcription_seconds = time.perf_counter() - started
 
             transcript = " ".join(text_parts).strip() or None
@@ -160,11 +185,17 @@ class AudioAnalyzer:
                 except ValueError as exc:
                     warnings.append(f"Transcript could not be scored: {exc}")
 
+            if word_timestamps and not words and transcript:
+                warnings.append(
+                    "word_timestamps requested but Faster-Whisper returned no usable word timings",
+                )
+
             logger.info(
-                "ASR complete path=%s chars=%s segments=%s duration=%.2fs warnings=%s",
+                "ASR complete path=%s chars=%s segments=%s words=%s duration=%.2fs warnings=%s",
                 source,
                 len(transcript) if transcript else 0,
                 len(segments),
+                len(words),
                 transcription_seconds,
                 len(warnings),
             )
@@ -173,6 +204,7 @@ class AudioAnalyzer:
                 transcript=transcript,
                 language=str(detected_language) if detected_language else self.language,
                 segments=segments,
+                words=words,
                 transcription_seconds=float(transcription_seconds),
                 audio_duration_seconds=audio_duration_f,
                 sentiment=sentiment,
@@ -183,6 +215,8 @@ class AudioAnalyzer:
                     "device": self.device,
                     "compute_type": self.compute_type,
                     "language_assumed": self.language,
+                    "word_timestamps_requested": bool(word_timestamps),
+                    "word_count": len(words),
                 },
             )
         finally:
@@ -192,3 +226,44 @@ class AudioAnalyzer:
                     tmp_dir.cleanup()
                 except OSError as exc:
                     logger.warning("Failed to clean temporary ASR files: %s", exc)
+
+    @staticmethod
+    def _extend_words_from_segment(
+        seg: Any,
+        words: list[SpeechWord],
+        *,
+        word_index: int,
+    ) -> int:
+        """Append usable Faster-Whisper word timings from one segment."""
+        raw_words = getattr(seg, "words", None) or ()
+        for raw in raw_words:
+            if raw is None:
+                continue
+            token = getattr(raw, "word", None)
+            if token is None:
+                token = getattr(raw, "text", None)
+            text = (str(token) if token is not None else "").strip()
+            if not text:
+                continue
+            start = getattr(raw, "start", None)
+            end = getattr(raw, "end", None)
+            if start is None or end is None:
+                continue
+            try:
+                start_f = float(start)
+                end_f = float(end)
+            except (TypeError, ValueError):
+                continue
+            if end_f < start_f:
+                start_f, end_f = end_f, start_f
+            words.append(
+                SpeechWord(
+                    start=start_f,
+                    end=end_f,
+                    text=text,
+                    word_id=f"word-{word_index:04d}",
+                ),
+            )
+            word_index += 1
+        return word_index
+

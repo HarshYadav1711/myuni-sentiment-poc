@@ -77,7 +77,11 @@ def test_short_synthetic_video_smoke(tmp_path: Path) -> None:
     video = tmp_path / "synthetic_2s.mp4"
     _generate_short_video(video)
 
-    pipeline = MyUniSentimentPipeline()
+    from src.config import TemporalReasonerConfig
+
+    pipeline = MyUniSentimentPipeline(
+        temporal_reasoner_config=TemporalReasonerConfig(enabled=False),
+    )
     activity = ActivityInput(
         activity_id="ACT-VID-SMOKE",
         user_id="U-SMOKE",
@@ -92,3 +96,61 @@ def test_short_synthetic_video_smoke(tmp_path: Path) -> None:
     assert result.analysis.video.frames_extracted >= 1
     assert result.analysis.modalities.visual is not None or result.analysis.warnings
     assert result.analysis.overall.model == "poc-fusion"
+    # Temporal context is parallel; must not replace fusion fields.
+    assert result.analysis.temporal_context is not None
+    assert result.analysis.temporal_context.window_seconds == 5.0
+    assert len(result.analysis.temporal_context.windows) >= 1
+    assert result.analysis.temporal_context.features.trajectory is not None
+    # Synthetic clip uses anullsrc — expect no speech evidence.
+    cov = result.analysis.temporal_context.features.evidence_coverage
+    assert cov.speech_coverage == 0.0 or not any(
+        w.speech_segments for w in result.analysis.temporal_context.windows
+    )
+
+
+@pytest.mark.integration
+def test_demo_video_temporal_context_report() -> None:
+    """Optional: report actual temporal_context from demo_assets/demo_video.mp4."""
+    demo = ROOT / "demo_assets" / "demo_video.mp4"
+    if not demo.is_file():
+        pytest.skip("demo_assets/demo_video.mp4 not present")
+
+    from src.config import TemporalReasonerConfig
+
+    pipeline = MyUniSentimentPipeline(
+        temporal_reasoner_config=TemporalReasonerConfig(enabled=False),
+    )
+    activity = ActivityInput(
+        activity_id="ACT-DEMO-TEMPORAL",
+        user_id="U-DEMO",
+        activity_type="video",
+        media_path=str(demo),
+        created_at=datetime.now(timezone.utc),
+    )
+    result = pipeline.analyze_activity(activity)
+    assert result.analysis.overall is not None
+    assert result.analysis.temporal_context is not None
+
+    tc = result.analysis.temporal_context
+    feats = tc.features
+    # Honest reporting — do not assert interesting trajectory.
+    print("\n=== DEMO VIDEO TEMPORAL CONTEXT ===")
+    print(f"duration_seconds={tc.duration_seconds}")
+    print(f"window_seconds={tc.window_seconds}")
+    print(f"events_total={tc.events_total} windows={len(tc.windows)}")
+    print(f"trajectory={feats.trajectory}")
+    print(f"negative_persistence={feats.negative_persistence}")
+    print(f"longest_negative_run={feats.longest_negative_run}")
+    print(f"strongest_negative_window={feats.strongest_negative_window}")
+    print(f"sudden_negative_change={feats.sudden_negative_change}")
+    print(f"cross_modal_agreement={feats.cross_modal_agreement}")
+    print(f"cross_modal_conflicts={len(feats.cross_modal_conflicts)}")
+    print(f"evidence_coverage={feats.evidence_coverage}")
+    print(f"overall_sentiment={result.analysis.overall.label} score={result.analysis.overall.score}")
+    print(f"transcript={result.analysis.transcript!r}")
+    print(f"speech_coverage={feats.evidence_coverage.speech_coverage}")
+    print("=== END DEMO TEMPORAL ===\n")
+
+    # Existing sentiment fields remain.
+    assert result.analysis.modalities is not None
+    assert result.analysis.fusion is not None

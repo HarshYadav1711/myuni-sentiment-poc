@@ -15,7 +15,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.analyzers.video import VideoAnalyzer, _ocr_frame_indices
-from src.config import VideoSamplingConfig
+from src.config import VideoSamplingConfig, TemporalReasonerConfig
 from src.media.ffmpeg_utils import VideoProbeInfo
 from src.pipeline import MyUniSentimentPipeline
 from src.schemas import ActivityInput, SentimentEvidence, SpeechAnalysisResult
@@ -66,6 +66,7 @@ def test_partial_modality_failure_still_returns_structure(tmp_path: Path) -> Non
         audio_analyzer=audio,
         sampling=VideoSamplingConfig(fps=1.0, max_frames=5, max_ocr_frames=5),
         debug=True,
+        temporal_reasoner_config=TemporalReasonerConfig(enabled=False),
     )
 
     frame1 = tmp_path / "frame_00001.jpg"
@@ -116,6 +117,8 @@ def test_output_structure_via_pipeline(tmp_path: Path) -> None:
         diagnostics=SimpleNamespace(),
         warnings=["No speech detected (empty transcript)".replace("empty", "partial")],
         overall=_ev("neutral", 0.0, 0.5),
+        temporal_context=None,
+        temporal_reasoning=None,
     )
     # Proper diagnostics object
     from src.schemas import VideoDiagnostics
@@ -193,6 +196,7 @@ def test_temp_cleanup(tmp_path: Path) -> None:
         audio_analyzer=audio,
         sampling=VideoSamplingConfig(fps=1.0, max_frames=2, max_ocr_frames=2),
         preserve_temp=False,
+        temporal_reasoner_config=TemporalReasonerConfig(enabled=False),
     )
     probe = VideoProbeInfo(duration_seconds=1.0, has_video=True, has_audio=True)
     frame = tmp_path / "f.jpg"

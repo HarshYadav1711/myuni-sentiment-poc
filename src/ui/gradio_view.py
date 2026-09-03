@@ -171,6 +171,36 @@ def render_technical_details(routed: Any) -> str:
                 "**Video path:** FFmpeg frame sampling (CPU) · SigLIP 2 (ZeroGPU) · "
                 "Faster-Whisper CPU int8 → Twitter-RoBERTa. Fusion is a POC baseline only."
             )
+            temporal = analysis.analysis.temporal_context
+            if temporal is not None:
+                feats = temporal.features
+                cov = feats.evidence_coverage
+                lines.append(
+                    f"**Deterministic temporal context:** window={temporal.window_seconds}s · "
+                    f"windows={len(temporal.windows)} · "
+                    f"trajectory=`{feats.trajectory}` · "
+                    f"usable_coverage={cov.overall_usable_coverage:.2f}"
+                )
+            reasoning = analysis.analysis.temporal_reasoning
+            if reasoning is not None:
+                lines.append(
+                    f"**Contextual reasoning (advisory):** status=`{reasoning.status}` · "
+                    f"context_type=`{reasoning.context_type}` · "
+                    f"confidence={reasoning.confidence:.2f}"
+                )
+                if reasoning.summary:
+                    preview = reasoning.summary[:180] + (
+                        "…" if len(reasoning.summary) > 180 else ""
+                    )
+                    lines.append(f"**Reasoning summary:** {preview}")
+            reasoner_diag = analysis.analysis.temporal_reasoner_diagnostics
+            if reasoner_diag is not None:
+                lines.append(
+                    f"**Reasoner timings:** prompt={reasoner_diag.prompt_construction_seconds or 0:.2f}s · "
+                    f"generation={reasoner_diag.generation_seconds or 0:.2f}s · "
+                    f"parse={reasoner_diag.parse_validation_seconds or 0:.2f}s · "
+                    f"total={reasoner_diag.total_reasoner_seconds or 0:.2f}s"
+                )
     if warnings:
         lines.append("**Pipeline notes:**")
         for warning in warnings[:8]:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import shutil
 import tempfile
 import time
 from dataclasses import dataclass, field
@@ -13,20 +14,46 @@ from src.analyzers.audio import AudioAnalyzer
 from src.analyzers.image import ImageAnalyzer
 from src.analyzers.ocr import is_meaningful_ocr_text
 from src.analyzers.text import TextSentimentAnalyzer
-from src.config import DEFAULT_FUSION, DEFAULT_VIDEO_SAMPLING, FusionConfig, VideoSamplingConfig
+from src.config import (
+    DEFAULT_FUSION,
+    DEFAULT_TEMPORAL,
+    DEFAULT_TEMPORAL_REASONER,
+    DEFAULT_VIDEO_SAMPLING,
+    FusionConfig,
+    TemporalConfig,
+    TemporalReasonerConfig,
+    VideoSamplingConfig,
+)
 from src.fusion import aggregate_frame_visual_scores, fuse_modalities
 from src.media.ffmpeg_utils import FFmpegError, FFmpegNotFoundError, probe_video
 from src.media.samplers import FrameSampler, SceneSamplingConfig, build_frame_sampler
 from src.schemas import (
+    DeterministicTemporalContext,
     SentimentEvidence,
     SpeechAnalysisResult,
+    TemporalContext,
+    TemporalReasonerDiagnostics,
+    TemporalReasoningResult,
     VideoDiagnostics,
     VideoFrameDebug,
 )
+from src.temporal.builder import TemporalContextBuilder
+from src.temporal.reasoner import TemporalContextReasoner
 
 logger = logging.getLogger(__name__)
 
 PathLike = Union[str, Path]
+
+
+@dataclass
+class FrameModalityEvidence:
+    """Per-frame visual/OCR evidence retained for temporal alignment."""
+
+    index: int
+    timestamp_seconds: float
+    visual: Optional[SentimentEvidence] = None
+    ocr_text: Optional[str] = None
+    ocr_sentiment: Optional[SentimentEvidence] = None
 
 
 @dataclass
@@ -42,6 +69,11 @@ class VideoAnalysisBundle:
     diagnostics: VideoDiagnostics
     warnings: list[str] = field(default_factory=list)
     overall: Optional[SentimentEvidence] = None
+    frame_evidence: list[FrameModalityEvidence] = field(default_factory=list)
+    temporal_context: Optional[TemporalContext] = None
+    deterministic_context: Optional[DeterministicTemporalContext] = None
+    temporal_reasoning: Optional[TemporalReasoningResult] = None
+    temporal_reasoner_diagnostics: Optional[TemporalReasonerDiagnostics] = None
 
 
 def _ocr_frame_indices(n_frames: int, max_ocr: int) -> set[int]:
@@ -61,6 +93,9 @@ class VideoAnalyzer:
 
     Baseline strategy: ``fixed_fps`` (~1 FPS via FFmpeg).
     Alternative: ``scene_keyframe`` (PySceneDetect + FFmpeg stills).
+
+    Temporal context is built in parallel from the same frame/speech evidence;
+    existing bag-of-frames fusion is unchanged.
     """
 
     def __init__(
@@ -74,6 +109,9 @@ class VideoAnalyzer:
         frame_sampler: Optional[FrameSampler] = None,
         sampling_strategy: str = "fixed_fps",
         fusion_config: FusionConfig = DEFAULT_FUSION,
+        temporal_config: TemporalConfig = DEFAULT_TEMPORAL,
+        temporal_reasoner_config: TemporalReasonerConfig = DEFAULT_TEMPORAL_REASONER,
+        temporal_reasoner: Optional[TemporalContextReasoner] = None,
         ffmpeg_path: Optional[str] = None,
         ffprobe_path: Optional[str] = None,
         debug: bool = False,
@@ -88,6 +126,10 @@ class VideoAnalyzer:
             max_ocr_frames=sampling.max_ocr_frames,
         )
         self.fusion_config = fusion_config
+        self.temporal_config = temporal_config
+        self.temporal_reasoner_config = temporal_reasoner_config
+        # Lazy: do not load Qwen at construction; reasoner object may be shared.
+        self._temporal_reasoner = temporal_reasoner
         self.ffmpeg_path = ffmpeg_path
         self.ffprobe_path = ffprobe_path
         self.debug = debug
@@ -97,6 +139,15 @@ class VideoAnalyzer:
             sampling=self.sampling,
             scene=self.scene_sampling,
         )
+
+    @property
+    def temporal_reasoner(self) -> Optional[TemporalContextReasoner]:
+        return self._temporal_reasoner
+
+    def _get_temporal_reasoner(self) -> TemporalContextReasoner:
+        if self._temporal_reasoner is None:
+            self._temporal_reasoner = TemporalContextReasoner(self.temporal_reasoner_config)
+        return self._temporal_reasoner
 
     @property
     def frame_sampler(self) -> FrameSampler:
@@ -150,7 +201,7 @@ class VideoAnalyzer:
             warnings.extend(sampled.warnings)
 
             frame_paths = sampled.paths
-            timestamps = sampled.timestamps
+            timestamps = list(sampled.timestamps)
             max_ocr = self.sampling.max_ocr_frames
             ocr_indices = _ocr_frame_indices(len(frame_paths), max_ocr)
 
@@ -185,17 +236,36 @@ class VideoAnalyzer:
             ocr_sentiments: list[SentimentEvidence] = []
             ocr_texts: list[str] = []
             frame_debug: list[VideoFrameDebug] = []
+            frame_evidence: list[FrameModalityEvidence] = []
             frames_analyzed = 0
             ocr_unavailable_noted = False
 
-            for idx, frame_path in enumerate(frame_paths):
-                ts = timestamps[idx] if idx < len(timestamps) else None
+            # Parallel arrays for temporal builder (aligned to sampled frame order).
+            temporal_visuals: list[Optional[SentimentEvidence]] = [None] * len(frame_paths)
+            temporal_ocr_texts: list[Optional[str]] = [None] * len(frame_paths)
+            temporal_ocr_sents: list[Optional[SentimentEvidence]] = [None] * len(frame_paths)
+
+            for idx, _frame_path in enumerate(frame_paths):
+                if idx < len(timestamps):
+                    ts = float(timestamps[idx])
+                else:
+                    fps = sampled.sampling_fps or self.sampling.fps or 1.0
+                    ts = round(idx / float(fps), 3)
+                    timestamps.append(ts)
+
                 visual = visual_by_idx.get(idx)
                 if visual is None:
                     err = frame_errors.get(idx, "no visual evidence")
                     msg = f"frame[{idx}] analysis failed: {err}"
                     warnings.append(msg)
                     logger.warning("%s", msg)
+                    frame_evidence.append(
+                        FrameModalityEvidence(
+                            index=idx,
+                            timestamp_seconds=float(ts),
+                            visual=None,
+                        ),
+                    )
                     if self.debug:
                         frame_debug.append(
                             VideoFrameDebug(
@@ -216,6 +286,7 @@ class VideoAnalyzer:
 
                     frame_visuals.append(visual)
                     frames_analyzed += 1
+                    temporal_visuals[idx] = visual
 
                     for w in frame_warnings:
                         if "OCR unavailable" in w:
@@ -225,10 +296,25 @@ class VideoAnalyzer:
                         elif "OCR returned no text" not in w and w not in warnings:
                             warnings.append(f"frame[{idx}]: {w}")
 
-                    if ocr_text and is_meaningful_ocr_text(ocr_text):
-                        ocr_texts.append(ocr_text)
+                    meaningful_ocr = (
+                        ocr_text if (ocr_text and is_meaningful_ocr_text(ocr_text)) else None
+                    )
+                    if meaningful_ocr:
+                        ocr_texts.append(meaningful_ocr)
+                        temporal_ocr_texts[idx] = meaningful_ocr
                     if ocr_sentiment is not None:
                         ocr_sentiments.append(ocr_sentiment)
+                        temporal_ocr_sents[idx] = ocr_sentiment
+
+                    frame_evidence.append(
+                        FrameModalityEvidence(
+                            index=idx,
+                            timestamp_seconds=float(ts),
+                            visual=visual,
+                            ocr_text=meaningful_ocr,
+                            ocr_sentiment=ocr_sentiment,
+                        ),
+                    )
 
                     if self.debug:
                         frame_debug.append(
@@ -245,6 +331,13 @@ class VideoAnalyzer:
                     msg = f"frame[{idx}] analysis failed: {exc}"
                     warnings.append(msg)
                     logger.warning("%s", msg)
+                    frame_evidence.append(
+                        FrameModalityEvidence(
+                            index=idx,
+                            timestamp_seconds=float(ts),
+                            visual=visual,
+                        ),
+                    )
                     if self.debug:
                         frame_debug.append(
                             VideoFrameDebug(
@@ -272,7 +365,7 @@ class VideoAnalyzer:
                 warnings.append("Video has no audio stream; speech modality skipped")
             else:
                 try:
-                    speech_result = self._audio.analyze(source)
+                    speech_result = self._audio.analyze(source, word_timestamps=True)
                     transcript = speech_result.transcript
                     speech_sentiment = speech_result.sentiment
                     for w in speech_result.warnings:
@@ -312,6 +405,26 @@ class VideoAnalyzer:
             )
             overall = overall_fusion.overall
 
+            temporal_context = self._build_temporal_context(
+                duration_seconds=probe.duration_seconds,
+                timestamps=timestamps,
+                visuals=temporal_visuals,
+                ocr_texts=temporal_ocr_texts,
+                ocr_sentiments=temporal_ocr_sents,
+                speech_result=speech_result,
+                warnings=warnings,
+            )
+            temporal_reasoning = self._build_temporal_reasoning(
+                temporal_context=temporal_context,
+                baseline_overall=overall,
+                warnings=warnings,
+            )
+            deterministic_context = (
+                DeterministicTemporalContext(context=temporal_context)
+                if temporal_context is not None
+                else None
+            )
+
             logger.info(
                 "Video analysis complete path=%s strategy=%s frames=%s/%s overall=%s",
                 source,
@@ -331,6 +444,15 @@ class VideoAnalyzer:
                 diagnostics=diagnostics,
                 warnings=warnings,
                 overall=overall,
+                frame_evidence=frame_evidence,
+                temporal_context=temporal_context,
+                deterministic_context=deterministic_context,
+                temporal_reasoning=temporal_reasoning,
+                temporal_reasoner_diagnostics=getattr(
+                    self,
+                    "_last_temporal_reasoner_diagnostics",
+                    None,
+                ),
             )
         finally:
             if tmp_root is not None:
@@ -340,12 +462,96 @@ class VideoAnalyzer:
                         tmp_root,
                     )
                 else:
-                    import shutil
-
                     try:
                         shutil.rmtree(tmp_root, ignore_errors=False)
                     except OSError as exc:
                         logger.warning("Failed to clean temporary video files: %s", exc)
+
+    def _build_temporal_context(
+        self,
+        *,
+        duration_seconds: float,
+        timestamps: Sequence[float],
+        visuals: Sequence[Optional[SentimentEvidence]],
+        ocr_texts: Sequence[Optional[str]],
+        ocr_sentiments: Sequence[Optional[SentimentEvidence]],
+        speech_result: Optional[SpeechAnalysisResult],
+        warnings: list[str],
+    ) -> Optional[TemporalContext]:
+        """Build parallel temporal context; failures must not break existing fusion."""
+        try:
+            segments = list(speech_result.segments) if speech_result is not None else []
+            words = list(speech_result.words) if speech_result is not None else []
+
+            def _score_speech(text: str) -> Optional[SentimentEvidence]:
+                if self._text is None:
+                    return None
+                cleaned = text.strip()
+                if not cleaned:
+                    return None
+                return self._text.analyze(cleaned)
+
+            builder = TemporalContextBuilder(
+                self.temporal_config,
+                speech_scorer=_score_speech if self._text is not None else None,
+            )
+            n = len(timestamps)
+            vis = list(visuals)[:n] + [None] * max(0, n - len(visuals))
+            ocr_t = list(ocr_texts)[:n] + [None] * max(0, n - len(ocr_texts))
+            ocr_s = list(ocr_sentiments)[:n] + [None] * max(0, n - len(ocr_sentiments))
+            return builder.build(
+                duration_seconds=float(duration_seconds),
+                timestamps=[float(t) for t in timestamps],
+                visuals=vis,
+                ocr_texts=ocr_t,
+                ocr_sentiments=ocr_s,
+                speech_segments=segments,
+                speech_words=words,
+            )
+        except Exception as exc:  # noqa: BLE001
+            msg = f"Temporal context build failed: {exc}"
+            warnings.append(msg)
+            logger.warning("%s", msg)
+            return None
+
+    def _build_temporal_reasoning(
+        self,
+        *,
+        temporal_context: Optional[TemporalContext],
+        baseline_overall: Optional[SentimentEvidence],
+        warnings: list[str],
+    ) -> Optional[TemporalReasoningResult]:
+        """Run additive LLM reasoner; never raise into the video path."""
+        self._last_temporal_reasoner_diagnostics = None
+        if temporal_context is None:
+            return None
+        if not self.temporal_reasoner_config.enabled:
+            from src.temporal.reasoner import disabled_reasoning_result
+
+            return disabled_reasoning_result(
+                model_id=self.temporal_reasoner_config.model_id,
+                reason="TEMPORAL_REASONER_ENABLED=false",
+            )
+        try:
+            reasoner = self._get_temporal_reasoner()
+            result, diagnostics = reasoner.reason(
+                temporal_context,
+                baseline_overall=baseline_overall,
+            )
+            self._last_temporal_reasoner_diagnostics = diagnostics
+            return result
+        except Exception as exc:  # noqa: BLE001
+            msg = f"Temporal reasoning failed: {exc}"
+            warnings.append(msg)
+            logger.warning("%s", msg)
+            return TemporalReasoningResult(
+                summary="",
+                context_type="uncertain",
+                confidence=0.0,
+                model=self.temporal_reasoner_config.model_id,
+                status="reasoner_unavailable",
+                details={"error": str(exc)},
+            )
 
     def _aggregate_ocr(
         self,
