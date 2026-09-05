@@ -27,26 +27,51 @@ from src.temporal.benchmark.schemas import ReasonerBenchmarkResult
 
 
 def test_single_fixture_duration_is_short() -> None:
-    d = estimate_gpu_duration_seconds(1)
+    d = estimate_gpu_duration_seconds(1, model_id=TEMPORAL_REASONER_CANDIDATE_1_7B)
     assert d == GPU_DURATION_SINGLE_FIXTURE_SECONDS
     assert 45 <= d <= 60
 
 
-def test_all_fixtures_duration_bounded() -> None:
-    d = estimate_gpu_duration_seconds(13)
-    assert d <= GPU_DURATION_ALL_FIXTURES_CAP_SECONDS
-    assert d >= 100  # larger than single-fixture budget, still bounded
+def test_4b_single_fixture_duration_approx_120() -> None:
+    d = estimate_gpu_duration_seconds(1, model_id=TEMPORAL_REASONER_CANDIDATE_4B)
+    assert d == 120
     assert d < 1200
+
+
+def test_all_fixtures_duration_bounded() -> None:
+    d17 = estimate_gpu_duration_seconds(13, model_id=TEMPORAL_REASONER_CANDIDATE_1_7B)
+    assert d17 <= GPU_DURATION_ALL_FIXTURES_CAP_SECONDS
+    assert d17 >= 100
+    assert d17 < 1200
+    d4 = estimate_gpu_duration_seconds(13, model_id=TEMPORAL_REASONER_CANDIDATE_4B)
+    assert d4 <= 300
+    assert d4 > 120
+    assert d4 < 1200
+
+
+def test_model_aware_duration_selection() -> None:
+    assert estimate_gpu_duration_seconds(1, TEMPORAL_REASONER_CANDIDATE_1_7B) == 60
+    assert estimate_gpu_duration_seconds(1, TEMPORAL_REASONER_CANDIDATE_4B) == 120
+    assert (
+        estimate_gpu_duration_seconds(1, TEMPORAL_REASONER_CANDIDATE_1_7B)
+        < estimate_gpu_duration_seconds(1, TEMPORAL_REASONER_CANDIDATE_4B)
+    )
 
 
 def test_single_smaller_than_all() -> None:
     assert estimate_gpu_duration_seconds(1) < estimate_gpu_duration_seconds(13)
+    assert estimate_gpu_duration_seconds(
+        1,
+        TEMPORAL_REASONER_CANDIDATE_4B,
+    ) < estimate_gpu_duration_seconds(13, TEMPORAL_REASONER_CANDIDATE_4B)
 
 
 def test_no_1200_in_duration_helper_or_deploy_app() -> None:
     assert estimate_gpu_duration_seconds(1) != 1200
     assert estimate_gpu_duration_seconds(13) != 1200
     assert estimate_gpu_duration_seconds(100) != 1200
+    assert estimate_gpu_duration_seconds(1, TEMPORAL_REASONER_CANDIDATE_4B) != 1200
+    assert estimate_gpu_duration_seconds(13, TEMPORAL_REASONER_CANDIDATE_4B) != 1200
     app_src = (DEPLOY / "app.py").read_text(encoding="utf-8")
     assert "@spaces.GPU(duration=1200)" not in app_src
     assert "duration=1200" not in app_src

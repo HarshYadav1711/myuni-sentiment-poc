@@ -351,6 +351,96 @@ def test_generation_failure_records_stage_and_logs(caplog: pytest.LogCaptureFixt
     assert any("generation failed" in r.message.lower() for r in caplog.records)
 
 
+def test_repair_generation_seconds_recorded_on_retry() -> None:
+    cfg = TemporalReasonerConfig(
+        enabled=True,
+        model_id="mock/model",
+        device="cpu",
+        max_retries=1,
+        max_new_tokens=32,
+        do_sample=True,
+        temperature=0.7,
+        top_p=0.8,
+        top_k=20,
+        seed=42,
+    )
+    reasoner = TemporalContextReasoner(cfg)
+    reasoner._tokenizer = object()
+    reasoner._model = object()
+    reasoner._torch = object()
+    reasoner._device = "cpu"
+    calls = {"n": 0}
+
+    def flaky(_system: str, _user: str) -> str:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return "{not-json"
+        # Valid enough for parse after repair.
+        from temporal_fixtures import fixture_stable_neutral as _f
+
+        ctx = _f()
+        eid = f"window-{ctx.windows[0].index}"
+        return json.dumps(
+            {
+                "summary": "ok after repair",
+                "trajectory_explanation": "stable neutral trajectory restated",
+                "cross_modal_context": {
+                    "consistency": "insufficient_evidence",
+                    "conflicts_detected": False,
+                    "description": "d",
+                },
+                "important_transitions": [],
+                "context_type": "uncertain",
+                "evidence": [{"evidence_id": eid, "explanation": "e"}],
+                "uncertainties": [],
+                "confidence": 0.4,
+                "status": "ok",
+            },
+        )
+
+    reasoner._generate = flaky  # type: ignore[method-assign]
+    result, diagnostics = reasoner.reason(fixture_stable_neutral())
+    assert calls["n"] == 2
+    assert diagnostics.repair_attempted is True
+    assert diagnostics.repair_generation_seconds is not None
+    assert diagnostics.repair_generation_seconds >= 0.0
+    assert result.status == "ok"
+
+
+def test_token_limit_plus_unterminated_json_marks_likely_truncation() -> None:
+    cfg = TemporalReasonerConfig(
+        enabled=True,
+        model_id="mock/model",
+        device="cpu",
+        max_retries=0,
+        max_new_tokens=16,
+    )
+    reasoner = TemporalContextReasoner(cfg)
+    reasoner._tokenizer = object()
+    reasoner._model = object()
+    reasoner._torch = object()
+    reasoner._device = "cpu"
+
+    def truncated(_system: str, _user: str) -> str:
+        reasoner._last_generation_meta = {
+            "generation_kwargs": {"max_new_tokens": 16, "do_sample": True},
+            "prompt_tokens": 100,
+            "generated_tokens": 16,
+            "sampling_warning_detected": False,
+        }
+        return '{"summary": "unterminated'
+
+    reasoner._generate = truncated  # type: ignore[method-assign]
+    result, diagnostics = reasoner.reason(fixture_stable_neutral())
+    assert result.status == "invalid_model_output"
+    assert diagnostics.repair_attempted is False
+    assert diagnostics.repair_generation_seconds is None
+    assert diagnostics.output_hit_token_limit is True
+    assert diagnostics.likely_output_truncation is True
+    assert result.details is not None
+    assert result.details.get("likely_output_truncation") is True
+
+
 def test_reasoner_disabled() -> None:
     reasoner = TemporalContextReasoner(TemporalReasonerConfig(enabled=False))
     result, _ = reasoner.reason(fixture_stable_neutral())

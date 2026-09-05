@@ -531,6 +531,7 @@ class TemporalReasonerDiagnostics(BaseModel):
     prompt_windows_included: Optional[int] = None
     evidence_ids_supplied: list[str] = Field(default_factory=list)
     repair_attempted: bool = False
+    repair_generation_seconds: Optional[float] = None
     raw_output_preview: Optional[str] = None
     generation_kwargs: Optional[dict[str, Any]] = Field(
         default=None,
@@ -541,6 +542,17 @@ class TemporalReasonerDiagnostics(BaseModel):
     sampling_warning_detected: bool = Field(
         default=False,
         description="True if Transformers warned that sampling flags were ignored.",
+    )
+    output_hit_token_limit: bool = Field(
+        default=False,
+        description="True when generated_tokens >= configured max_new_tokens.",
+    )
+    likely_output_truncation: bool = Field(
+        default=False,
+        description=(
+            "True when output hit the token limit and parse failed in a way "
+            "consistent with mid-string truncation (e.g. Unterminated string)."
+        ),
     )
     # Fail-soft diagnostics (safe, non-secret). Full traceback stays in logs.
     reasoner_error_type: Optional[str] = None

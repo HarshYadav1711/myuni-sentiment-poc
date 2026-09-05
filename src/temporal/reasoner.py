@@ -258,27 +258,72 @@ class TemporalContextReasoner:
                 valid_window_ranges=valid_window_ranges,
             )
             diagnostics.parse_validation_seconds = time.perf_counter() - parse_started
+            self._apply_truncation_flags(diagnostics, parse_error=None)
             diagnostics.total_reasoner_seconds = time.perf_counter() - total_started
             return result, diagnostics
         except Exception as first_exc:  # noqa: BLE001
+            self._apply_truncation_flags(diagnostics, parse_error=first_exc)
             if self.config.max_retries < 1:
                 diagnostics.total_reasoner_seconds = time.perf_counter() - total_started
                 _apply_failure_diagnostics(diagnostics, first_exc, stage="parse")
-                return self._invalid(raw, first_exc), diagnostics
+                return self._invalid(raw, first_exc, diagnostics=diagnostics), diagnostics
 
-            diagnostics.repair_attempted = True
             repair = build_repair_prompt(
                 validation_error=format_validation_error(first_exc),
                 previous_output=raw,
             )
+            # Do not set repair_attempted until repair generation is invoked.
             try:
                 gen_started = time.perf_counter()
                 raw_retry = self._generate(SYSTEM_INSTRUCTION, repair)
+                repair_s = time.perf_counter() - gen_started
+                diagnostics.repair_attempted = True
+                diagnostics.repair_generation_seconds = repair_s
                 diagnostics.generation_seconds = (
                     diagnostics.generation_seconds or 0.0
-                ) + (time.perf_counter() - gen_started)
+                ) + repair_s
                 diagnostics.raw_output_preview = raw_retry[:500]
                 self._apply_generation_meta(diagnostics)
+            except Exception as repair_gen_exc:  # noqa: BLE001
+                diagnostics.repair_attempted = True
+                diagnostics.repair_generation_seconds = (
+                    time.perf_counter() - gen_started
+                )
+                logger.exception(
+                    "Temporal reasoner repair generation failed model=%s",
+                    self.config.model_id,
+                )
+                _apply_failure_diagnostics(
+                    diagnostics,
+                    repair_gen_exc,
+                    stage="generation",
+                )
+                diagnostics.total_reasoner_seconds = time.perf_counter() - total_started
+                self._apply_generation_meta(diagnostics)
+                return (
+                    TemporalReasoningResult(
+                        summary="",
+                        context_type="uncertain",
+                        confidence=0.0,
+                        model=self.config.model_id,
+                        status="generation_failed",
+                        details={
+                            "error": (
+                                f"repair_generation_failed: "
+                                f"{_safe_error_message(repair_gen_exc)}"
+                            ),
+                            "first_error": format_validation_error(first_exc),
+                            "reasoner_error_type": diagnostics.reasoner_error_type,
+                            "reasoner_error_message": diagnostics.reasoner_error_message,
+                            "reasoner_failure_stage": diagnostics.reasoner_failure_stage,
+                            "output_hit_token_limit": diagnostics.output_hit_token_limit,
+                            "likely_output_truncation": diagnostics.likely_output_truncation,
+                        },
+                    ),
+                    diagnostics,
+                )
+
+            try:
                 parse_started = time.perf_counter()
                 result = parse_reasoning_result(
                     raw_retry,
@@ -289,13 +334,50 @@ class TemporalContextReasoner:
                 diagnostics.parse_validation_seconds = (
                     diagnostics.parse_validation_seconds or 0.0
                 ) + (time.perf_counter() - parse_started)
+                self._apply_truncation_flags(diagnostics, parse_error=None)
                 diagnostics.total_reasoner_seconds = time.perf_counter() - total_started
                 return result, diagnostics
             except Exception as second_exc:  # noqa: BLE001
+                self._apply_truncation_flags(diagnostics, parse_error=second_exc)
                 diagnostics.total_reasoner_seconds = time.perf_counter() - total_started
                 self._apply_generation_meta(diagnostics)
                 _apply_failure_diagnostics(diagnostics, second_exc, stage="parse")
-                return self._invalid(raw, second_exc, first_error=first_exc), diagnostics
+                return (
+                    self._invalid(
+                        raw_retry,
+                        second_exc,
+                        first_error=first_exc,
+                        diagnostics=diagnostics,
+                    ),
+                    diagnostics,
+                )
+
+    def _apply_truncation_flags(
+        self,
+        diagnostics: TemporalReasonerDiagnostics,
+        *,
+        parse_error: Optional[BaseException],
+    ) -> None:
+        max_tok = int(self.config.max_new_tokens)
+        gen_tok = diagnostics.generated_tokens
+        hit = gen_tok is not None and int(gen_tok) >= max_tok
+        diagnostics.output_hit_token_limit = bool(hit)
+        likely = False
+        if hit and parse_error is not None:
+            msg = str(parse_error).lower()
+            if any(
+                needle in msg
+                for needle in (
+                    "unterminated",
+                    "jsondecodeerror",
+                    "expecting value",
+                    "expecting ','",
+                    "expecting property",
+                    "invalid control character",
+                )
+            ):
+                likely = True
+        diagnostics.likely_output_truncation = bool(likely)
 
     def _apply_generation_meta(self, diagnostics: TemporalReasonerDiagnostics) -> None:
         meta = self._last_generation_meta or {}
@@ -314,6 +396,7 @@ class TemporalContextReasoner:
         exc: Exception,
         *,
         first_error: Optional[Exception] = None,
+        diagnostics: Optional[TemporalReasonerDiagnostics] = None,
     ) -> TemporalReasoningResult:
         details: dict[str, Any] = {
             "error": format_validation_error(exc),
@@ -324,6 +407,15 @@ class TemporalContextReasoner:
         }
         if first_error is not None:
             details["first_error"] = format_validation_error(first_error)
+        if diagnostics is not None:
+            details["output_hit_token_limit"] = bool(diagnostics.output_hit_token_limit)
+            details["likely_output_truncation"] = bool(
+                diagnostics.likely_output_truncation,
+            )
+            if diagnostics.repair_generation_seconds is not None:
+                details["repair_generation_seconds"] = (
+                    diagnostics.repair_generation_seconds
+                )
         return TemporalReasoningResult(
             summary="",
             context_type="uncertain",

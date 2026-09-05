@@ -103,6 +103,8 @@ class ReasonerBenchmarkRunner:
             "generation_kwargs": diagnostics.generation_kwargs,
             "sampling_warning_detected": diagnostics.sampling_warning_detected,
             "candidate_model_prepare_seconds": candidate_model_prepare_seconds,
+            "output_hit_token_limit": diagnostics.output_hit_token_limit,
+            "likely_output_truncation": diagnostics.likely_output_truncation,
             "note_model_load_seconds": (
                 "model_load_seconds is the per-reason() load() call "
                 "(often a no-op after session prepare); "
@@ -155,6 +157,7 @@ class ReasonerBenchmarkRunner:
             prompt_construction_seconds=diagnostics.prompt_construction_seconds,
             model_load_seconds=diagnostics.model_load_seconds,
             candidate_model_prepare_seconds=candidate_model_prepare_seconds,
+            repair_generation_seconds=diagnostics.repair_generation_seconds,
             total_seconds=diagnostics.total_reasoner_seconds,
             prompt_tokens=diagnostics.prompt_tokens,
             generated_tokens=diagnostics.generated_tokens,

@@ -97,6 +97,8 @@ TEMPORAL_REASONER_MODEL = "Qwen/Qwen3-1.7B"
 # Explicit device only — never inferred from torch.cuda.is_available() (ZeroGPU).
 TEMPORAL_REASONER_DEVICE = "cpu"
 TEMPORAL_REASONER_MAX_NEW_TOKENS = 768
+# Benchmark / evaluation profile only (Phase 3B). Production greedy default stays 768.
+TEMPORAL_REASONER_EVAL_MAX_NEW_TOKENS = 1024
 TEMPORAL_REASONER_TEMPERATURE = 0.0
 TEMPORAL_REASONER_TOP_P = 1.0
 TEMPORAL_REASONER_TOP_K = 0
@@ -234,7 +236,7 @@ def evaluation_reasoner_config(
         seed=TEMPORAL_REASONER_EVAL_SEED,
         do_sample=TEMPORAL_REASONER_EVAL_DO_SAMPLE,
         enable_thinking=False,
-        max_new_tokens=TEMPORAL_REASONER_MAX_NEW_TOKENS,
+        max_new_tokens=TEMPORAL_REASONER_EVAL_MAX_NEW_TOKENS,
         max_retries=TEMPORAL_REASONER_MAX_RETRIES,
     )
     base.update(overrides)

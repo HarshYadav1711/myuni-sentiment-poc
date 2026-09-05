@@ -51,7 +51,7 @@ from src.temporal.benchmark.synthetic import (
     fixture_visual_neg_speech_neg,
     fixture_visual_pos_speech_neg,
 )
-from src.temporal.prompt import SYSTEM_INSTRUCTION, build_evidence_payload
+from src.temporal.prompt import SYSTEM_INSTRUCTION, build_evidence_payload, build_user_prompt
 from src.temporal.reasoner import TemporalContextReasoner
 from src.schemas import TemporalReasoningResult
 
@@ -84,10 +84,38 @@ def test_evaluation_config_explicit_do_sample() -> None:
     assert cfg.top_k == 20
     assert cfg.seed == TEMPORAL_REASONER_EVAL_SEED
     assert cfg.enable_thinking is False
+    assert cfg.max_new_tokens == 1024
     reasoner = TemporalContextReasoner(cfg)
     gen = reasoner.build_generation_config()
     assert gen["do_sample"] is True
     assert gen["temperature"] == pytest.approx(0.7)
+
+
+def test_both_candidates_share_eval_output_budget() -> None:
+    c17 = evaluation_reasoner_config(TEMPORAL_REASONER_CANDIDATE_1_7B)
+    c4 = evaluation_reasoner_config(TEMPORAL_REASONER_CANDIDATE_4B)
+    assert c17.max_new_tokens == 1024
+    assert c4.max_new_tokens == 1024
+    assert c17.max_new_tokens == c4.max_new_tokens
+
+
+def test_same_frozen_fixture_builds_identical_user_prompt_for_both_candidates() -> None:
+    """Semantic evidence/prompt text is identical; token counts may differ by tokenizer."""
+    payload = load_benchmark_payload(get_fixture_spec("stable_neutral"))
+    c17 = evaluation_reasoner_config(TEMPORAL_REASONER_CANDIDATE_1_7B)
+    c4 = evaluation_reasoner_config(TEMPORAL_REASONER_CANDIDATE_4B)
+    e17 = build_evidence_payload(
+        payload.temporal_context,
+        baseline_overall=payload.baseline_overall,
+        config=c17,
+    )
+    e4 = build_evidence_payload(
+        payload.temporal_context,
+        baseline_overall=payload.baseline_overall,
+        config=c4,
+    )
+    assert build_user_prompt(e17) == build_user_prompt(e4)
+    assert SYSTEM_INSTRUCTION  # shared constant for both candidates
 
 
 def test_fixed_seed_recorded_on_eval_config() -> None:
