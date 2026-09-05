@@ -36,6 +36,8 @@ _UNAVAILABLE_STATUSES = frozenset(
         "generation_failed",
         "disabled",
         "model_unavailable",
+        "gpu_allocation_failed",
+        "quota_unavailable",
     },
 )
 

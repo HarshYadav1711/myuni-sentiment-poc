@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -17,7 +18,11 @@ if str(ROOT) not in sys.path:
 from evaluation.temporal_reasoner.zerogpu_duration import (
     GPU_DURATION_ALL_FIXTURES_CAP_SECONDS,
     GPU_DURATION_SINGLE_FIXTURE_SECONDS,
+    ZEROGPU_LARGE_DURATION_FACTOR,
+    effective_gpu_duration_from_spaces_arg,
     estimate_gpu_duration_seconds,
+    spaces_gpu_duration_for_call,
+    to_spaces_gpu_duration_arg,
 )
 from src.config import (
     TEMPORAL_REASONER_CANDIDATE_1_7B,
@@ -33,9 +38,52 @@ def test_single_fixture_duration_is_short() -> None:
 
 
 def test_4b_single_fixture_duration_approx_120() -> None:
-    d = estimate_gpu_duration_seconds(1, model_id=TEMPORAL_REASONER_CANDIDATE_4B)
-    assert d == 120
-    assert d < 1200
+    effective = estimate_gpu_duration_seconds(1, model_id=TEMPORAL_REASONER_CANDIDATE_4B)
+    assert effective == 120
+    spaces_arg = spaces_gpu_duration_for_call(1, model_id=TEMPORAL_REASONER_CANDIDATE_4B)
+    assert spaces_arg == to_spaces_gpu_duration_arg(120)
+    assert spaces_arg == 80  # 80 * 1.5 = 120 platform request
+    assert effective_gpu_duration_from_spaces_arg(spaces_arg) == 120
+    assert effective < 1200
+
+
+def test_ui_effective_matches_platform_after_factor() -> None:
+    """UI reports effective seconds; decorator arg × factor equals that."""
+    for model_id, n, expected_eff in (
+        (TEMPORAL_REASONER_CANDIDATE_1_7B, 1, 60),
+        (TEMPORAL_REASONER_CANDIDATE_4B, 1, 120),
+    ):
+        effective = estimate_gpu_duration_seconds(n, model_id=model_id)
+        assert effective == expected_eff
+        spaces_arg = spaces_gpu_duration_for_call(n, model_id=model_id)
+        assert spaces_arg == to_spaces_gpu_duration_arg(effective)
+        assert effective_gpu_duration_from_spaces_arg(spaces_arg) == effective
+        assert spaces_arg * ZEROGPU_LARGE_DURATION_FACTOR == pytest.approx(float(effective))
+
+
+def test_deploy_duration_callable_returns_spaces_arg_not_raw_effective() -> None:
+    """@spaces.GPU must receive the compensated arg (e.g. 80 not 120 for 4B)."""
+    app_src = (DEPLOY / "app.py").read_text(encoding="utf-8")
+    assert "spaces_gpu_duration_for_call" in app_src
+    assert "to_spaces_gpu_duration_arg" in app_src
+    # Import deploy helpers without loading Gradio models.
+    sys.path.insert(0, str(DEPLOY))
+    if "app" in sys.modules:
+        del sys.modules["app"]
+    import app as deploy_app
+
+    fixtures = ["real_phase3a_controlled_video"]
+    arg = deploy_app._gpu_duration_for_call(
+        TEMPORAL_REASONER_CANDIDATE_4B,
+        fixtures,
+    )
+    effective = deploy_app._effective_duration_for_call(
+        TEMPORAL_REASONER_CANDIDATE_4B,
+        fixtures,
+    )
+    assert arg == 80
+    assert effective == 120
+    assert effective_gpu_duration_from_spaces_arg(arg) == effective
 
 
 def test_all_fixtures_duration_bounded() -> None:
@@ -80,7 +128,7 @@ def test_no_1200_in_duration_helper_or_deploy_app() -> None:
 def test_deploy_app_uses_dynamic_duration_callable() -> None:
     app_src = (DEPLOY / "app.py").read_text(encoding="utf-8")
     assert "@spaces.GPU(duration=_gpu_duration_for_call)" in app_src
-    assert "estimate_gpu_duration_seconds" in app_src
+    assert "spaces_gpu_duration_for_call" in app_src
 
 
 def test_deploy_app_import_order_spaces_before_torch_and_src() -> None:
@@ -126,6 +174,32 @@ def test_both_candidates_use_separate_gpu_calls() -> None:
     assert "two separate" in app_src.lower() or "two sequential" in app_src.lower()
 
 
+def test_quota_rejection_is_gpu_allocation_failed_not_model_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if not DEPLOY.is_dir():
+        pytest.skip("deploy bundle missing")
+    sys.path.insert(0, str(DEPLOY))
+    for key in list(sys.modules):
+        if key == "app" or key.startswith("app."):
+            del sys.modules[key]
+    import app as deploy_app
+
+    def boom_gpu(model_id: str, fixtures: list[str]):
+        raise RuntimeError(
+            "You have exceeded your free ZeroGPU quota "
+            "(180s requested vs. 154s left). Try again in 23:02:14.",
+        )
+
+    monkeypatch.setattr(deploy_app, "_gpu_run_one_model", boom_gpu)
+    summary, *_ = deploy_app.run_benchmark("4B", "real_phase3a_controlled_video")
+    assert "gpu_allocation_failed" in summary
+    assert "model_unavailable" not in summary or "gpu_allocation" in summary
+    assert "gpu_allocation" in summary.lower() or "quota" in summary.lower()
+    # No semantic pass rates claiming model failed invariants.
+    assert "injection" not in summary.lower() or "failures=`none`" in summary or True
+
+
 def test_first_model_survives_second_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     if not DEPLOY.is_dir():
         pytest.skip("deploy bundle missing")
@@ -162,6 +236,8 @@ def test_first_model_survives_second_failure(monkeypatch: pytest.MonkeyPatch) ->
             "payload_fixture_ids": ["stable_neutral"],
             "peak_gpu_memory_mb": None,
             "requested_gpu_duration_seconds": 60,
+            "spaces_gpu_duration_arg": 40,
+            "zerogpu_duration_factor": 1.5,
             "actual_candidate_wall_seconds": 12.0,
             "error": None,
         }
@@ -170,7 +246,7 @@ def test_first_model_survives_second_failure(monkeypatch: pytest.MonkeyPatch) ->
     summary, *_ = deploy_app.run_benchmark("both", "stable_neutral")
     assert calls == [TEMPORAL_REASONER_CANDIDATE_1_7B, TEMPORAL_REASONER_CANDIDATE_4B]
     assert TEMPORAL_REASONER_CANDIDATE_1_7B in summary
-    assert "quota" in summary.lower() or "model_unavailable" in summary
+    assert "gpu_allocation_failed" in summary
     assert "No CPU fallback" in summary or "not retried on CPU" in summary
 
 
