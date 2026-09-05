@@ -95,6 +95,36 @@ class ReasonerBenchmarkRunner:
             parse_error=parse_error,
         )
 
+        details: dict = {
+            "prompt_chars": diagnostics.prompt_chars,
+            "evidence_ids_supplied": diagnostics.evidence_ids_supplied,
+            "generation_kwargs": diagnostics.generation_kwargs,
+            "sampling_warning_detected": diagnostics.sampling_warning_detected,
+        }
+        # Preserve fail-soft error fields from TemporalReasoningResult.details
+        # (previously discarded — left status=reasoner_unavailable with no cause).
+        if isinstance(result.details, dict):
+            for key in (
+                "error",
+                "reasoner_error_type",
+                "reasoner_error_message",
+                "reasoner_failure_stage",
+            ):
+                if key in result.details and result.details[key] is not None:
+                    details[key] = result.details[key]
+        if diagnostics.reasoner_error_type is not None:
+            details.setdefault("reasoner_error_type", diagnostics.reasoner_error_type)
+        if diagnostics.reasoner_error_message is not None:
+            details.setdefault(
+                "reasoner_error_message",
+                diagnostics.reasoner_error_message,
+            )
+        if diagnostics.reasoner_failure_stage is not None:
+            details.setdefault(
+                "reasoner_failure_stage",
+                diagnostics.reasoner_failure_stage,
+            )
+
         return ReasonerBenchmarkResult(
             model_id=reasoner.model_id,
             fixture_id=payload.fixture_id,
@@ -123,12 +153,7 @@ class ReasonerBenchmarkRunner:
             invariant_notes=list(checks.notes),
             unsupported_claim_flags=list(checks.unsupported_claim_flags),
             human_review=HumanReviewFields(),
-            details={
-                "prompt_chars": diagnostics.prompt_chars,
-                "evidence_ids_supplied": diagnostics.evidence_ids_supplied,
-                "generation_kwargs": diagnostics.generation_kwargs,
-                "sampling_warning_detected": diagnostics.sampling_warning_detected,
-            },
+            details=details,
         )
 
     def run_model_on_payloads(

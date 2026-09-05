@@ -7,6 +7,7 @@ Does not receive raw video/images/audio.
 from __future__ import annotations
 
 import logging
+import re
 import time
 from typing import Any, Optional
 
@@ -28,6 +29,31 @@ from src.temporal.prompt import (
 
 logger = logging.getLogger(__name__)
 
+_SECRET_RE = re.compile(
+    r"(hf_[A-Za-z0-9]+)|(Bearer\s+\S+)|(token[=:]\s*\S+)|(api[_-]?key[=:]\s*\S+)",
+    re.IGNORECASE,
+)
+
+
+def _safe_error_message(exc: BaseException, *, limit: int = 400) -> str:
+    """Truncate and redact obvious secret-like substrings for artifact storage."""
+    text = str(exc).replace("\n", " ").strip()
+    text = _SECRET_RE.sub("[REDACTED]", text)
+    if len(text) > limit:
+        text = text[: limit - 3] + "..."
+    return text
+
+
+def _apply_failure_diagnostics(
+    diagnostics: TemporalReasonerDiagnostics,
+    exc: BaseException,
+    *,
+    stage: str,
+) -> None:
+    diagnostics.reasoner_error_type = type(exc).__name__
+    diagnostics.reasoner_error_message = _safe_error_message(exc)
+    diagnostics.reasoner_failure_stage = stage
+
 
 class TemporalContextReasoner:
     """Lazy-loaded text reasoner for video temporal context (Phase 2)."""
@@ -40,6 +66,7 @@ class TemporalContextReasoner:
         self._last_generation_meta: dict[str, Any] = {}
         self._device: str = (config.device or "cpu").strip() or "cpu"
         self._torch = None
+        self._failure_stage_hint: str = "unknown"
 
     def unload(self) -> None:
         """Drop model/tokenizer references. GPU cache clearing is deployment-layer."""
@@ -47,6 +74,7 @@ class TemporalContextReasoner:
         self._tokenizer = None
         self._last_generation_meta = {}
         self._load_error = None
+        self._failure_stage_hint = "unknown"
         try:
             import gc
 
@@ -81,17 +109,26 @@ class TemporalContextReasoner:
             import torch
             from transformers import AutoModelForCausalLM, AutoTokenizer
 
+            self._failure_stage_hint = "tokenizer_load"
             self._tokenizer = AutoTokenizer.from_pretrained(self.config.model_id)
+            self._failure_stage_hint = "model_load"
             self._model = AutoModelForCausalLM.from_pretrained(self.config.model_id)
+            self._failure_stage_hint = "device_placement"
             self._model.to(device)
             self._model.eval()
             self._device = device
             self._torch = torch
+            self._failure_stage_hint = "unknown"
         except Exception as exc:  # noqa: BLE001
+            stage = self._failure_stage_hint or "model_load"
             self._load_error = f"Failed to load temporal reasoner: {exc}"
             self._tokenizer = None
             self._model = None
-            logger.exception("Temporal reasoner load failed")
+            logger.exception(
+                "Temporal reasoner load failed stage=%s model=%s",
+                stage,
+                self.config.model_id,
+            )
             raise RuntimeError(self._load_error) from exc
 
         logger.info(
@@ -129,7 +166,16 @@ class TemporalContextReasoner:
             self.load()
             diagnostics.model_load_seconds = time.perf_counter() - load_started
         except Exception as exc:  # noqa: BLE001
+            stage = self._failure_stage_hint or "model_load"
+            if stage not in (
+                "tokenizer_load",
+                "model_load",
+                "device_placement",
+            ):
+                stage = "model_load"
+            _apply_failure_diagnostics(diagnostics, exc, stage=stage)
             diagnostics.total_reasoner_seconds = time.perf_counter() - total_started
+            # load() already logs with traceback; keep fail-soft return.
             return (
                 TemporalReasoningResult(
                     summary="",
@@ -137,7 +183,12 @@ class TemporalContextReasoner:
                     confidence=0.0,
                     model=self.config.model_id,
                     status="reasoner_unavailable",
-                    details={"error": str(exc)},
+                    details={
+                        "error": _safe_error_message(exc),
+                        "reasoner_error_type": diagnostics.reasoner_error_type,
+                        "reasoner_error_message": diagnostics.reasoner_error_message,
+                        "reasoner_failure_stage": diagnostics.reasoner_failure_stage,
+                    },
                 ),
                 diagnostics,
             )
@@ -166,7 +217,19 @@ class TemporalContextReasoner:
             diagnostics.raw_output_preview = raw[:500]
             self._apply_generation_meta(diagnostics)
         except Exception as exc:  # noqa: BLE001
-            logger.warning("Temporal reasoner generation failed: %s", exc)
+            stage = self._failure_stage_hint or "generation"
+            if stage not in (
+                "prompt_construction",
+                "device_placement",
+                "generation",
+            ):
+                stage = "generation"
+            logger.exception(
+                "Temporal reasoner generation failed stage=%s model=%s",
+                stage,
+                self.config.model_id,
+            )
+            _apply_failure_diagnostics(diagnostics, exc, stage=stage)
             diagnostics.total_reasoner_seconds = time.perf_counter() - total_started
             self._apply_generation_meta(diagnostics)
             return (
@@ -175,8 +238,13 @@ class TemporalContextReasoner:
                     context_type="uncertain",
                     confidence=0.0,
                     model=self.config.model_id,
-                    status="reasoner_unavailable",
-                    details={"error": f"generation_failed: {exc}"},
+                    status="generation_failed",
+                    details={
+                        "error": f"generation_failed: {_safe_error_message(exc)}",
+                        "reasoner_error_type": diagnostics.reasoner_error_type,
+                        "reasoner_error_message": diagnostics.reasoner_error_message,
+                        "reasoner_failure_stage": diagnostics.reasoner_failure_stage,
+                    },
                 ),
                 diagnostics,
             )
@@ -195,6 +263,7 @@ class TemporalContextReasoner:
         except Exception as first_exc:  # noqa: BLE001
             if self.config.max_retries < 1:
                 diagnostics.total_reasoner_seconds = time.perf_counter() - total_started
+                _apply_failure_diagnostics(diagnostics, first_exc, stage="parse")
                 return self._invalid(raw, first_exc), diagnostics
 
             diagnostics.repair_attempted = True
@@ -225,6 +294,7 @@ class TemporalContextReasoner:
             except Exception as second_exc:  # noqa: BLE001
                 diagnostics.total_reasoner_seconds = time.perf_counter() - total_started
                 self._apply_generation_meta(diagnostics)
+                _apply_failure_diagnostics(diagnostics, second_exc, stage="parse")
                 return self._invalid(raw, second_exc, first_error=first_exc), diagnostics
 
     def _apply_generation_meta(self, diagnostics: TemporalReasonerDiagnostics) -> None:
@@ -248,6 +318,9 @@ class TemporalContextReasoner:
         details: dict[str, Any] = {
             "error": format_validation_error(exc),
             "raw_preview": (raw or "")[:500],
+            "reasoner_failure_stage": "parse",
+            "reasoner_error_type": type(exc).__name__,
+            "reasoner_error_message": _safe_error_message(exc),
         }
         if first_error is not None:
             details["first_error"] = format_validation_error(first_error)
@@ -259,6 +332,32 @@ class TemporalContextReasoner:
             status="invalid_model_output",
             details=details,
         )
+
+    def _seed_rng_for_generation(self, torch: Any, *, seed: int, device: str) -> None:
+        """Reset global RNG state before each generate() for seeded sampling.
+
+        Does not pass ``generator`` / ``seed`` into ``model.generate`` (rejected
+        by current Qwen Transformers paths). Documents seeded sampling only —
+        not bit-for-bit deterministic GPU inference.
+        """
+        torch.manual_seed(int(seed))
+        if str(device).startswith("cuda"):
+            try:
+                torch.cuda.manual_seed_all(int(seed))
+            except Exception:  # noqa: BLE001
+                pass
+        try:
+            import random
+
+            random.seed(int(seed))
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            import numpy as np
+
+            np.random.seed(int(seed) % (2**32 - 1))
+        except Exception:  # noqa: BLE001
+            pass
 
     def _generate(self, system: str, user: str) -> str:
         assert self._tokenizer is not None
@@ -281,6 +380,7 @@ class TemporalContextReasoner:
             capability,
             enable_thinking=bool(self.config.enable_thinking),
         )
+        self._failure_stage_hint = "prompt_construction"
         try:
             prompt_text = self._tokenizer.apply_chat_template(
                 messages,
@@ -294,6 +394,7 @@ class TemporalContextReasoner:
                 add_generation_prompt=True,
             )
 
+        self._failure_stage_hint = "device_placement"
         inputs = self._tokenizer([prompt_text], return_tensors="pt")
         inputs = {k: v.to(device) for k, v in inputs.items()}
 
@@ -301,35 +402,33 @@ class TemporalContextReasoner:
         gen_kwargs.update({
             "max_new_tokens": int(self.config.max_new_tokens),
         })
-        if gen_kwargs.get("do_sample", False):
-            try:
-                gen_kwargs["generator"] = torch.Generator(device=device).manual_seed(
-                    int(self.config.seed),
-                )
-            except Exception:
-                gen_kwargs["generator"] = torch.Generator().manual_seed(
-                    int(self.config.seed),
-                )
+        # Qwen / current Transformers reject unused model_kwargs including
+        # ``generator`` and ``seed``. Seed via global PyTorch RNG instead —
+        # reset before *each* generation for per-fixture reproducibility.
+        seed = int(self.config.seed)
+        self._seed_rng_for_generation(torch, seed=seed, device=device)
 
-        recorded_kwargs = {
-            k: v
-            for k, v in gen_kwargs.items()
-            if k != "generator" and v is not None
-        }
-        recorded_kwargs["seed"] = int(self.config.seed)
+        recorded_kwargs = {k: v for k, v in gen_kwargs.items() if v is not None}
+        recorded_kwargs["seed"] = seed
         recorded_kwargs["device"] = device
         recorded_kwargs["model_id"] = self.config.model_id
         recorded_kwargs["chat_template_kwargs"] = {
             k: v for k, v in apply_kwargs.items() if k != "tokenize"
         }
+        # Never record unsupported generate kwargs.
+        recorded_kwargs.pop("generator", None)
 
         import warnings
 
         sampling_warning = False
+        self._failure_stage_hint = "generation"
         with torch.inference_mode():
             clean_kwargs = {k: v for k, v in gen_kwargs.items() if v is not None}
+            # Never pass generator/seed into model.generate (rejected by Qwen).
+            clean_kwargs.pop("generator", None)
+            clean_kwargs.pop("seed", None)
             if not clean_kwargs.get("do_sample", False):
-                for key in ("temperature", "top_p", "top_k", "generator"):
+                for key in ("temperature", "top_p", "top_k"):
                     clean_kwargs.pop(key, None)
             with warnings.catch_warnings(record=True) as caught:
                 warnings.simplefilter("always")
@@ -348,6 +447,7 @@ class TemporalContextReasoner:
             "generated_tokens": int(generated.shape[-1]),
             "sampling_warning_detected": sampling_warning,
         }
+        self._failure_stage_hint = "unknown"
         return self._tokenizer.decode(generated, skip_special_tokens=True).strip()
 
     def build_generation_config(self) -> dict[str, Any]:

@@ -451,6 +451,7 @@ ReasonerStatus = Literal[
     "ok",
     "disabled",
     "reasoner_unavailable",
+    "generation_failed",
     "invalid_model_output",
 ]
 
@@ -540,6 +541,16 @@ class TemporalReasonerDiagnostics(BaseModel):
     sampling_warning_detected: bool = Field(
         default=False,
         description="True if Transformers warned that sampling flags were ignored.",
+    )
+    # Fail-soft diagnostics (safe, non-secret). Full traceback stays in logs.
+    reasoner_error_type: Optional[str] = None
+    reasoner_error_message: Optional[str] = None
+    reasoner_failure_stage: Optional[str] = Field(
+        default=None,
+        description=(
+            "model_load | tokenizer_load | device_placement | "
+            "prompt_construction | generation | parse | unknown"
+        ),
     )
 
 

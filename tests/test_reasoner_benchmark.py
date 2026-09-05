@@ -342,6 +342,103 @@ def test_report_serialization(tmp_path: Path) -> None:
     assert "- context_quality: ` `" in md
 
 
+def test_unavailable_inference_not_fake_semantic_pass() -> None:
+    payload = load_benchmark_payload(get_fixture_spec("stable_neutral"))
+    result = TemporalReasoningResult(
+        summary="",
+        context_type="uncertain",
+        confidence=0.0,
+        model=TEMPORAL_REASONER_CANDIDATE_1_7B,
+        status="generation_failed",
+        details={"error": "generation_failed: boom"},
+    )
+    checks = evaluate_invariants(
+        payload=payload,
+        result=result,
+        spec=get_fixture_spec("stable_neutral"),
+        schema_valid=False,
+    )
+    assert checks.schema_valid is False
+    assert checks.prompt_injection_resisted is None
+    assert checks.uncertainty_requirement_met is None
+    assert checks.valid_evidence_ids is None
+    assert checks.deterministic_fact_preservation is None
+
+    row = ReasonerBenchmarkResult(
+        model_id=TEMPORAL_REASONER_CANDIDATE_1_7B,
+        fixture_id="stable_neutral",
+        run_id="r-fail",
+        seed=42,
+        status="generation_failed",
+        schema_valid=False,
+        prompt_injection_resisted=None,
+        uncertainty_requirement_met=None,
+        valid_evidence_ids=None,
+        deterministic_fact_preservation=None,
+        conflict_preservation=None,
+        transition_timestamps_valid=None,
+    )
+    rates = aggregate_pass_rates([row])
+    model_rates = rates[TEMPORAL_REASONER_CANDIDATE_1_7B]
+    assert model_rates["schema_success_rate"] == 0.0
+    assert model_rates["injection_resistance_rate"] is None
+    assert model_rates["uncertainty_pass_rate"] is None
+
+
+def test_runner_preserves_reasoner_error_diagnostics(monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(_system: str, _user: str) -> str:
+        raise RuntimeError("device-side generate failed")
+
+    def fake_load(self) -> None:  # noqa: ANN001
+        # Mark loaded without downloading any Qwen weights.
+        self._tokenizer = object()
+        self._model = object()
+        self._device = "cpu"
+        self._torch = object()
+
+    monkeypatch.setattr(
+        "src.temporal.benchmark.runner.TemporalContextReasoner.load",
+        fake_load,
+    )
+
+    runner = ReasonerBenchmarkRunner(
+        model_ids=[TEMPORAL_REASONER_CANDIDATE_1_7B],
+        generate_override=boom,
+        skip_missing_real=True,
+        forbid_model_ids={TEMPORAL_REASONER_CANDIDATE_4B},
+    )
+    results, _ = runner.run_all(fixture_ids=["stable_neutral"])
+    assert len(results) == 1
+    row = results[0]
+    assert row.status == "generation_failed"
+    assert row.details is not None
+    assert row.details.get("reasoner_error_type") == "RuntimeError"
+    assert "device-side generate failed" in (row.details.get("reasoner_error_message") or "")
+    assert row.details.get("reasoner_failure_stage") == "generation"
+    assert row.prompt_injection_resisted is None
+    assert row.uncertainty_requirement_met is None
+
+
+def test_non_injection_fixture_injection_check_is_na_on_success() -> None:
+    payload = load_benchmark_payload(get_fixture_spec("stable_neutral"))
+    result = TemporalReasoningResult.model_validate(
+        json.loads(
+            _ok_json(
+                evidence=[{"evidence_id": "window-0", "explanation": "ok"}],
+                trajectory_explanation="stable neutral trajectory",
+            ),
+        ),
+    )
+    checks = evaluate_invariants(
+        payload=payload,
+        result=result,
+        spec=get_fixture_spec("stable_neutral"),
+        schema_valid=True,
+    )
+    assert checks.prompt_injection_resisted is None
+    assert checks.uncertainty_requirement_met is None
+
+
 def test_real_phase3a_payload_if_present() -> None:
     if not REAL_CONTROLLED_PAYLOAD_PATH.is_file():
         pytest.skip("real Phase 3A fixture not exported yet")

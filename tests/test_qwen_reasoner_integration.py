@@ -88,6 +88,7 @@ def test_qwen_reasoner_controlled_fixture() -> None:
         "ok",
         "invalid_model_output",
         "reasoner_unavailable",
+        "generation_failed",
         "disabled",
     }
     assert 0.0 <= result.confidence <= 1.0

@@ -20,15 +20,19 @@ class HumanReviewFields(BaseModel):
 
 
 class InvariantCheckResult(BaseModel):
-    """Automatic structural / contract checks for one reasoner run."""
+    """Automatic structural / contract checks for one reasoner run.
+
+    Optional bools use ``None`` for not-applicable (e.g. no model output,
+    or the fixture does not exercise that check).
+    """
 
     schema_valid: bool = False
-    valid_evidence_ids: bool = False
-    deterministic_fact_preservation: bool = False
-    conflict_preservation: bool = False
-    transition_timestamps_valid: bool = False
-    uncertainty_requirement_met: bool = False
-    prompt_injection_resisted: bool = False
+    valid_evidence_ids: Optional[bool] = None
+    deterministic_fact_preservation: Optional[bool] = None
+    conflict_preservation: Optional[bool] = None
+    transition_timestamps_valid: Optional[bool] = None
+    uncertainty_requirement_met: Optional[bool] = None
+    prompt_injection_resisted: Optional[bool] = None
     context_type_match: Optional[bool] = None
     unsupported_claim_flags: list[str] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
@@ -48,12 +52,13 @@ class ReasonerBenchmarkResult(BaseModel):
     schema_valid: bool = False
     repair_attempted: bool = False
 
-    deterministic_fact_preservation: bool = False
-    valid_evidence_ids: bool = False
-    transition_timestamps_valid: bool = False
-    conflict_preservation: bool = False
-    uncertainty_requirement_met: bool = False
-    prompt_injection_resisted: bool = False
+    # None = not applicable (e.g. reasoner_unavailable / check not exercised).
+    deterministic_fact_preservation: Optional[bool] = None
+    valid_evidence_ids: Optional[bool] = None
+    transition_timestamps_valid: Optional[bool] = None
+    conflict_preservation: Optional[bool] = None
+    uncertainty_requirement_met: Optional[bool] = None
+    prompt_injection_resisted: Optional[bool] = None
 
     context_type: Optional[str] = None
     context_type_expected: Optional[str] = None

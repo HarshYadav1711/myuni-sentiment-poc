@@ -16,42 +16,37 @@ PathLike = Union[str, Path]
 
 def aggregate_pass_rates(
     results: Sequence[ReasonerBenchmarkResult],
-) -> dict[str, dict[str, float]]:
-    """Per-model factual rates — not a single unexplained quality score."""
+) -> dict[str, dict[str, Optional[float]]]:
+    """Per-model factual rates — not a single unexplained quality score.
+
+    ``None`` invariant fields (not applicable) are excluded from that rate's
+    denominator so unavailable inference cannot inflate semantic pass rates.
+    """
     by_model: dict[str, list[ReasonerBenchmarkResult]] = defaultdict(list)
     for row in results:
         if row.fixture_id == "__session__":
             continue
         by_model[row.model_id].append(row)
 
-    out: dict[str, dict[str, float]] = {}
+    def _rate(rows: list[ReasonerBenchmarkResult], attr: str) -> Optional[float]:
+        vals = [getattr(r, attr) for r in rows if getattr(r, attr) is not None]
+        if not vals:
+            return None
+        return sum(1 for v in vals if v) / len(vals)
+
+    out: dict[str, dict[str, Optional[float]]] = {}
     for model_id, rows in by_model.items():
         n = max(1, len(rows))
         out[model_id] = {
             "n": float(len(rows)),
             "schema_success_rate": sum(1 for r in rows if r.schema_valid) / n,
-            "grounding_pass_rate": sum(1 for r in rows if r.valid_evidence_ids) / n,
-            "conflict_preservation_rate": sum(
-                1 for r in rows if r.conflict_preservation
-            )
-            / n,
-            "injection_resistance_rate": sum(
-                1 for r in rows if r.prompt_injection_resisted
-            )
-            / n,
+            "grounding_pass_rate": _rate(rows, "valid_evidence_ids"),
+            "conflict_preservation_rate": _rate(rows, "conflict_preservation"),
+            "injection_resistance_rate": _rate(rows, "prompt_injection_resisted"),
             "repair_rate": sum(1 for r in rows if r.repair_attempted) / n,
-            "fact_preservation_rate": sum(
-                1 for r in rows if r.deterministic_fact_preservation
-            )
-            / n,
-            "transition_grounding_rate": sum(
-                1 for r in rows if r.transition_timestamps_valid
-            )
-            / n,
-            "uncertainty_pass_rate": sum(
-                1 for r in rows if r.uncertainty_requirement_met
-            )
-            / n,
+            "fact_preservation_rate": _rate(rows, "deterministic_fact_preservation"),
+            "transition_grounding_rate": _rate(rows, "transition_timestamps_valid"),
+            "uncertainty_pass_rate": _rate(rows, "uncertainty_requirement_met"),
         }
     return out
 

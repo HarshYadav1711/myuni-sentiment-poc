@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -316,8 +317,38 @@ def test_model_unavailable() -> None:
     cfg = TemporalReasonerConfig(enabled=True, model_id="not-a-real/model")
     reasoner = TemporalContextReasoner(cfg)
     reasoner._load_error = "boom"
-    result, _ = reasoner.reason(fixture_stable_neutral())
+    result, diagnostics = reasoner.reason(fixture_stable_neutral())
     assert result.status == "reasoner_unavailable"
+    assert diagnostics.reasoner_error_type == "RuntimeError"
+    assert diagnostics.reasoner_error_message is not None
+    assert "boom" in diagnostics.reasoner_error_message
+    assert diagnostics.reasoner_failure_stage == "model_load"
+    assert result.details is not None
+    assert result.details.get("reasoner_failure_stage") == "model_load"
+
+
+def test_generation_failure_records_stage_and_logs(caplog: pytest.LogCaptureFixture) -> None:
+    cfg = TemporalReasonerConfig(enabled=True, model_id="mock/model", device="cpu")
+    reasoner = TemporalContextReasoner(cfg)
+    reasoner._tokenizer = object()
+    reasoner._model = object()
+    reasoner._torch = type("T", (), {"inference_mode": staticmethod(lambda: __import__("contextlib").nullcontext()), "Generator": None})()
+    reasoner._device = "cpu"
+
+    def boom(_system: str, _user: str) -> str:
+        reasoner._failure_stage_hint = "generation"
+        raise RuntimeError("cuda explode")
+
+    reasoner._generate = boom  # type: ignore[method-assign]
+    with caplog.at_level(logging.ERROR):
+        result, diagnostics = reasoner.reason(fixture_stable_neutral())
+    assert result.status == "generation_failed"
+    assert diagnostics.reasoner_failure_stage == "generation"
+    assert diagnostics.reasoner_error_type == "RuntimeError"
+    assert "cuda explode" in (diagnostics.reasoner_error_message or "")
+    assert diagnostics.prompt_construction_seconds is not None
+    assert diagnostics.generation_seconds is None
+    assert any("generation failed" in r.message.lower() for r in caplog.records)
 
 
 def test_reasoner_disabled() -> None:
@@ -622,6 +653,71 @@ def test_qwen_generation_config_construction() -> None:
     assert sample_cfg["temperature"] == pytest.approx(0.7)
     assert sample_cfg["top_p"] == pytest.approx(0.8)
     assert sample_cfg["top_k"] == 20
+
+
+def test_generate_never_passes_generator_or_seed_kwarg(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Qwen rejects unused model_kwargs including generator; use torch.manual_seed."""
+    import torch
+
+    cfg = TemporalReasonerConfig(
+        enabled=True,
+        model_id="mock/model",
+        device="cpu",
+        temperature=0.7,
+        top_p=0.8,
+        top_k=20,
+        do_sample=True,
+        seed=42,
+        max_new_tokens=16,
+    )
+    reasoner = TemporalContextReasoner(cfg)
+
+    class _Tok:
+        def apply_chat_template(self, messages, **kwargs):  # noqa: ANN001
+            return "PROMPT"
+
+        def __call__(self, texts, return_tensors=None):  # noqa: ANN001
+            return {"input_ids": torch.tensor([[1, 2, 3]]), "attention_mask": torch.tensor([[1, 1, 1]])}
+
+        def decode(self, ids, skip_special_tokens=True):  # noqa: ANN001
+            return '{"summary":"ok","trajectory_explanation":"t","cross_modal_context":{"consistency":"insufficient_evidence","conflicts_detected":false,"description":"d"},"important_transitions":[],"context_type":"uncertain","evidence":[{"evidence_id":"window-0","explanation":"e"}],"uncertainties":[],"confidence":0.5,"status":"ok"}'
+
+    captured: dict = {}
+    seed_calls: list[int] = []
+
+    class _Model:
+        def generate(self, **kwargs):  # noqa: ANN003
+            captured["kwargs"] = dict(kwargs)
+            # Return ids longer than input so decode path works.
+            return torch.tensor([[1, 2, 3, 4, 5]])
+
+    reasoner._tokenizer = _Tok()
+    reasoner._model = _Model()
+    reasoner._torch = torch
+    reasoner._device = "cpu"
+
+    real_manual_seed = torch.manual_seed
+
+    def tracking_manual_seed(s: int) -> None:
+        seed_calls.append(int(s))
+        return real_manual_seed(s)
+
+    monkeypatch.setattr(torch, "manual_seed", tracking_manual_seed)
+
+    # Two generations → seed reset each time (per-fixture reproducibility).
+    out1 = reasoner._generate("sys", "user-a")
+    out2 = reasoner._generate("sys", "user-b")
+    assert isinstance(out1, str) and isinstance(out2, str)
+
+    assert "generator" not in captured["kwargs"]
+    assert "seed" not in captured["kwargs"]
+    assert captured["kwargs"].get("do_sample") is True
+    assert captured["kwargs"].get("temperature") == pytest.approx(0.7)
+    assert captured["kwargs"].get("top_p") == pytest.approx(0.8)
+    assert captured["kwargs"].get("top_k") == 20
+    assert seed_calls == [42, 42]
+    assert "generator" not in (reasoner._last_generation_meta.get("generation_kwargs") or {})
+    assert (reasoner._last_generation_meta.get("generation_kwargs") or {}).get("seed") == 42
 
 
 def test_phase1_temporal_output_unchanged() -> None:
