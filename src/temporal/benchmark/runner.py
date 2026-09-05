@@ -6,6 +6,7 @@ must not download Qwen3-4B.
 
 from __future__ import annotations
 
+import time
 import uuid
 from typing import Callable, Optional, Sequence
 
@@ -69,6 +70,7 @@ class ReasonerBenchmarkRunner:
         *,
         spec: Optional[BenchmarkFixtureSpec] = None,
         run_id: Optional[str] = None,
+        candidate_model_prepare_seconds: Optional[float] = None,
     ) -> ReasonerBenchmarkResult:
         """Run one already-loaded reasoner on one frozen payload."""
         spec = spec or get_fixture_spec(payload.fixture_id)
@@ -100,6 +102,12 @@ class ReasonerBenchmarkRunner:
             "evidence_ids_supplied": diagnostics.evidence_ids_supplied,
             "generation_kwargs": diagnostics.generation_kwargs,
             "sampling_warning_detected": diagnostics.sampling_warning_detected,
+            "candidate_model_prepare_seconds": candidate_model_prepare_seconds,
+            "note_model_load_seconds": (
+                "model_load_seconds is the per-reason() load() call "
+                "(often a no-op after session prepare); "
+                "candidate_model_prepare_seconds is the real once-per-candidate load."
+            ),
         }
         # Preserve fail-soft error fields from TemporalReasoningResult.details
         # (previously discarded — left status=reasoner_unavailable with no cause).
@@ -146,6 +154,7 @@ class ReasonerBenchmarkRunner:
             parse_seconds=diagnostics.parse_validation_seconds,
             prompt_construction_seconds=diagnostics.prompt_construction_seconds,
             model_load_seconds=diagnostics.model_load_seconds,
+            candidate_model_prepare_seconds=candidate_model_prepare_seconds,
             total_seconds=diagnostics.total_reasoner_seconds,
             prompt_tokens=diagnostics.prompt_tokens,
             generated_tokens=diagnostics.generated_tokens,
@@ -170,9 +179,12 @@ class ReasonerBenchmarkRunner:
             )
         cfg = self.build_config(model_id)
         reasoner = TemporalContextReasoner(cfg)
+        candidate_prepare_s: Optional[float] = None
         # When generate_override is set, never call load().
         if self.generate_override is None:
+            prepare_started = time.perf_counter()
             reasoner.load()
+            candidate_prepare_s = time.perf_counter() - prepare_started
         results: list[ReasonerBenchmarkResult] = []
         try:
             for payload in payloads:
@@ -185,7 +197,14 @@ class ReasonerBenchmarkRunner:
                             fixture_id=payload.fixture_id,
                             description=payload.source,
                         )
-                results.append(self.run_fixture(reasoner, payload, spec=spec))
+                results.append(
+                    self.run_fixture(
+                        reasoner,
+                        payload,
+                        spec=spec,
+                        candidate_model_prepare_seconds=candidate_prepare_s,
+                    ),
+                )
         finally:
             if self.generate_override is None:
                 reasoner.unload()

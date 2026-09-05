@@ -67,7 +67,16 @@ class ReasonerBenchmarkResult(BaseModel):
     generation_seconds: Optional[float] = None
     parse_seconds: Optional[float] = None
     prompt_construction_seconds: Optional[float] = None
+    # Per-reason() load() call timing (often a no-op cache check after session load).
     model_load_seconds: Optional[float] = None
+    # Once-per-candidate tokenizer+model+device prepare time (session load).
+    candidate_model_prepare_seconds: Optional[float] = Field(
+        default=None,
+        description=(
+            "Wall seconds for the candidate session load "
+            "(tokenizer + weights + device placement). Measured once per model."
+        ),
+    )
     repair_generation_seconds: Optional[float] = None
     total_seconds: Optional[float] = None
 

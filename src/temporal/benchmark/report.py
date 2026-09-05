@@ -14,6 +14,32 @@ from src.temporal.benchmark.schemas import ReasonerBenchmarkResult
 PathLike = Union[str, Path]
 
 
+def invariant_failure_labels(row: ReasonerBenchmarkResult) -> list[str]:
+    """Labels for invariants that explicitly FAILED (False).
+
+    Tri-state: True=PASS, False=FAIL, None=NOT_APPLICABLE.
+    N/A must never appear in the failure list.
+    """
+    fail_bits: list[str] = []
+    if row.schema_valid is False:
+        fail_bits.append("schema")
+    if row.valid_evidence_ids is False:
+        fail_bits.append("evidence_ids")
+    if row.deterministic_fact_preservation is False:
+        fail_bits.append("facts")
+    if row.conflict_preservation is False:
+        fail_bits.append("conflicts")
+    if row.transition_timestamps_valid is False:
+        fail_bits.append("transitions")
+    if row.uncertainty_requirement_met is False:
+        fail_bits.append("uncertainty")
+    if row.prompt_injection_resisted is False:
+        fail_bits.append("injection")
+    if row.context_type_match is False:
+        fail_bits.append("context_type")
+    return fail_bits
+
+
 def aggregate_pass_rates(
     results: Sequence[ReasonerBenchmarkResult],
 ) -> dict[str, dict[str, Optional[float]]]:
@@ -54,7 +80,10 @@ def aggregate_pass_rates(
 def performance_summary(
     results: Sequence[ReasonerBenchmarkResult],
 ) -> dict[str, dict[str, float | int | None]]:
-    """Per-model latency / token summary (not a quality score)."""
+    """Per-model latency / token summary (not a quality score).
+
+    Distinguishes once-per-candidate prepare time from per-fixture generation.
+    """
     by_model: dict[str, list[ReasonerBenchmarkResult]] = defaultdict(list)
     for row in results:
         if row.fixture_id == "__session__":
@@ -73,14 +102,28 @@ def performance_summary(
             if n >= 2
             else (gens_sorted[0] if n == 1 else None)
         )
-        loads = [float(r.model_load_seconds) for r in rows if r.model_load_seconds]
+        parses = [float(r.parse_seconds) for r in rows if r.parse_seconds is not None]
+        prepares = [
+            float(r.candidate_model_prepare_seconds)
+            for r in rows
+            if r.candidate_model_prepare_seconds is not None
+        ]
+        # Session prepare is recorded once per candidate (same value on each row).
+        prepare = prepares[0] if prepares else None
+        fixture_totals = [
+            float(r.total_seconds) for r in rows if r.total_seconds is not None
+        ]
         out[model_id] = {
             "n_fixtures": len(rows),
+            "candidate_model_prepare_seconds": prepare,
             "mean_generation_seconds": mean,
             "median_generation_seconds": median,
             "p95_generation_seconds": p95,
             "total_generation_seconds": sum(gens_sorted) if gens_sorted else None,
-            "model_load_seconds_max": max(loads) if loads else None,
+            "mean_parse_seconds": (sum(parses) / len(parses)) if parses else None,
+            "total_fixture_reasoner_seconds": (
+                sum(fixture_totals) if fixture_totals else None
+            ),
             "mean_prompt_tokens": (
                 sum(r.prompt_tokens or 0 for r in rows) / len(rows) if rows else None
             ),
@@ -130,6 +173,8 @@ def write_results_csv(
         "context_type_expected",
         "context_type_match",
         "generation_seconds",
+        "parse_seconds",
+        "candidate_model_prepare_seconds",
         "total_seconds",
         "prompt_tokens",
         "generated_tokens",
@@ -160,6 +205,8 @@ def write_results_csv(
                     "context_type_expected": r.context_type_expected,
                     "context_type_match": r.context_type_match,
                     "generation_seconds": r.generation_seconds,
+                    "parse_seconds": r.parse_seconds,
+                    "candidate_model_prepare_seconds": r.candidate_model_prepare_seconds,
                     "total_seconds": r.total_seconds,
                     "prompt_tokens": r.prompt_tokens,
                     "generated_tokens": r.generated_tokens,
@@ -250,6 +297,9 @@ def write_human_review_markdown(
             )
             lines.append(f"- context_type: `{row.context_type}`")
             lines.append(f"- generation_seconds: `{row.generation_seconds}`")
+            lines.append(
+                f"- candidate_model_prepare_seconds: `{row.candidate_model_prepare_seconds}`",
+            )
             lines.append(f"- raw_preview: `{row.raw_output_preview}`")
             lines.append("")
             lines.append("Human review (fill manually):")

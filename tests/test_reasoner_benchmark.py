@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -437,6 +438,143 @@ def test_non_injection_fixture_injection_check_is_na_on_success() -> None:
     )
     assert checks.prompt_injection_resisted is None
     assert checks.uncertainty_requirement_met is None
+
+
+def test_na_invariants_not_listed_as_failures() -> None:
+    from src.temporal.benchmark.report import invariant_failure_labels
+
+    row = ReasonerBenchmarkResult(
+        model_id=TEMPORAL_REASONER_CANDIDATE_1_7B,
+        fixture_id="real_phase3a_controlled_video",
+        run_id="r-ok",
+        seed=42,
+        status="ok",
+        schema_valid=True,
+        valid_evidence_ids=True,
+        deterministic_fact_preservation=True,
+        conflict_preservation=True,
+        transition_timestamps_valid=True,
+        uncertainty_requirement_met=None,  # N/A
+        prompt_injection_resisted=None,  # N/A
+        context_type_match=None,
+    )
+    fails = invariant_failure_labels(row)
+    assert "injection" not in fails
+    assert "uncertainty" not in fails
+    assert fails == []
+
+    # Explicit FAIL still listed; N/A never coerced to FAIL or PASS.
+    row_fail = row.model_copy(update={"prompt_injection_resisted": False})
+    assert "injection" in invariant_failure_labels(row_fail)
+    assert row.prompt_injection_resisted is None  # unchanged source
+
+
+def test_sparse_uncertainty_na_on_non_sparse_fixture() -> None:
+    payload = load_benchmark_payload(get_fixture_spec("stable_neutral"))
+    result = TemporalReasoningResult.model_validate(
+        json.loads(_ok_json(evidence=[{"evidence_id": "window-0", "explanation": "ok"}])),
+    )
+    checks = evaluate_invariants(
+        payload=payload,
+        result=result,
+        spec=get_fixture_spec("stable_neutral"),
+        schema_valid=True,
+    )
+    assert checks.uncertainty_requirement_met is None
+    assert checks.prompt_injection_resisted is None
+
+
+def test_candidate_model_prepare_timed_once_per_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    load_calls: list[float] = []
+
+    def fake_load(self) -> None:  # noqa: ANN001
+        load_calls.append(1.0)
+        self._tokenizer = object()
+        self._model = object()
+        self._device = "cpu"
+        self._torch = object()
+        # Simulate non-trivial prepare wall time without sleeping.
+        self._simulated_prepare = 1.25
+
+    real_perf = time.perf_counter
+    clock = {"t": 100.0}
+
+    def fake_perf() -> float:
+        return clock["t"]
+
+    def load_with_clock(self) -> None:  # noqa: ANN001
+        clock["t"] += 0.01
+        started = clock["t"]
+        fake_load(self)
+        clock["t"] = started + 1.25
+
+    monkeypatch.setattr(
+        "src.temporal.benchmark.runner.TemporalContextReasoner.load",
+        load_with_clock,
+    )
+    monkeypatch.setattr(time, "perf_counter", fake_perf)
+
+    def fake_generate(system: str, user: str) -> str:
+        return _ok_json(
+            evidence=[{"evidence_id": "window-0", "explanation": "ok"}],
+            trajectory_explanation="stable neutral",
+        )
+
+    # generate_override would skip load — call run_model_on_payloads without override
+    # but patch _generate after load via monkeypatch on reason method path:
+    runner = ReasonerBenchmarkRunner(
+        model_ids=[TEMPORAL_REASONER_CANDIDATE_1_7B],
+        skip_missing_real=True,
+        forbid_model_ids={TEMPORAL_REASONER_CANDIDATE_4B},
+    )
+
+    def reason_no_download(self, temporal, *, baseline_overall=None):  # noqa: ANN001
+        from src.schemas import TemporalReasonerDiagnostics, TemporalReasoningResult
+
+        diag = TemporalReasonerDiagnostics(
+            model_load_seconds=0.000005,
+            generation_seconds=0.5,
+            parse_validation_seconds=0.01,
+            prompt_construction_seconds=0.001,
+            total_reasoner_seconds=0.52,
+        )
+        result = TemporalReasoningResult.model_validate(
+            json.loads(
+                _ok_json(
+                    evidence=[{"evidence_id": "window-0", "explanation": "ok"}],
+                    trajectory_explanation="stable neutral",
+                ),
+            ),
+        )
+        return result, diag
+
+    monkeypatch.setattr(
+        "src.temporal.benchmark.runner.TemporalContextReasoner.reason",
+        reason_no_download,
+    )
+
+    payload = load_benchmark_payload(get_fixture_spec("stable_neutral"))
+    payload2 = load_benchmark_payload(get_fixture_spec("sparse_visual_only"))
+    results = runner.run_model_on_payloads(
+        TEMPORAL_REASONER_CANDIDATE_1_7B,
+        [payload, payload2],
+    )
+    assert len(load_calls) == 1
+    assert len(results) == 2
+    prepares = [r.candidate_model_prepare_seconds for r in results]
+    assert prepares[0] == pytest.approx(1.25, abs=0.02)
+    assert prepares[1] == pytest.approx(1.25, abs=0.02)
+    # Fixture generation timing remains separate from prepare.
+    assert results[0].generation_seconds == pytest.approx(0.5)
+    assert results[0].model_load_seconds == pytest.approx(0.000005)
+    from src.temporal.benchmark.report import performance_summary
+
+    perf = performance_summary(results)
+    assert perf[TEMPORAL_REASONER_CANDIDATE_1_7B]["candidate_model_prepare_seconds"] == pytest.approx(
+        1.25,
+        abs=0.02,
+    )
+    assert "model_load_seconds_max" not in perf[TEMPORAL_REASONER_CANDIDATE_1_7B]
 
 
 def test_real_phase3a_payload_if_present() -> None:
