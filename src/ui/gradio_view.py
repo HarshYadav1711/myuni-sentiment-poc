@@ -280,13 +280,28 @@ def render_technical_details(routed: Any) -> str:
                     lines.append(f"**Reasoner provider:** `{reasoner_diag.provider}`")
                 if reasoner_diag.provider == "openrouter":
                     req_model = None
-                    if reasoner_diag.generation_kwargs and isinstance(
-                        reasoner_diag.generation_kwargs.get("model"),
-                        str,
-                    ):
-                        req_model = reasoner_diag.generation_kwargs.get("model")
+                    fallback_models = None
+                    if reasoner_diag.generation_kwargs:
+                        raw_req = reasoner_diag.generation_kwargs.get("requested_model")
+                        if not isinstance(raw_req, str):
+                            raw_req = reasoner_diag.generation_kwargs.get("model")
+                        if isinstance(raw_req, str) and raw_req.strip():
+                            req_model = raw_req.strip()
+                        raw_fb = reasoner_diag.generation_kwargs.get("fallback_models")
+                        if isinstance(raw_fb, list) and raw_fb:
+                            fallback_models = [
+                                str(item).strip()
+                                for item in raw_fb
+                                if str(item).strip()
+                            ]
                     if req_model:
                         lines.append(f"**OpenRouter request model:** `{req_model}`")
+                    if fallback_models:
+                        lines.append(
+                            "**OpenRouter fallback models:** `"
+                            + "`, `".join(fallback_models)
+                            + "`"
+                        )
                     if reasoner_diag.openrouter_routed_model:
                         lines.append(
                             f"**OpenRouter routed model:** `{reasoner_diag.openrouter_routed_model}`"

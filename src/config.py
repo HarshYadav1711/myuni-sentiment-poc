@@ -105,6 +105,8 @@ TEMPORAL_REASONER_FALLBACK = "none"
 # OpenRouter (client-facing temporal demo). API key from env only — never hardcode.
 OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
 OPENROUTER_REASONER_MODEL = "google/gemma-4-26b-a4b-it:free"
+# Comma-separated OpenRouter free-model fallbacks (native ``models`` request field).
+OPENROUTER_REASONER_FALLBACK_MODELS = "dots-studio/dots-3-note-preview:free"
 OPENROUTER_TIMEOUT_SECONDS = 60.0
 # At most one bounded retry for transient 429/5xx (plus the initial attempt).
 OPENROUTER_MAX_TRANSIENT_RETRIES = 1
@@ -195,6 +197,20 @@ class TemporalConfig:
             raise ValueError("window_seconds must be > 0")
 
 
+def parse_openrouter_fallback_models(raw: Optional[str] = None) -> list[str]:
+    """Parse comma-separated OpenRouter free-model fallback IDs."""
+    text = OPENROUTER_REASONER_FALLBACK_MODELS if raw is None else str(raw)
+    out: list[str] = []
+    seen: set[str] = set()
+    for part in text.split(","):
+        cleaned = part.strip()
+        if not cleaned or cleaned in seen:
+            continue
+        out.append(cleaned)
+        seen.add(cleaned)
+    return out
+
+
 @dataclass(frozen=True)
 class TemporalReasonerConfig:
     """Text LLM contextual reasoner settings (additive; never replaces fusion).
@@ -231,6 +247,11 @@ class TemporalReasonerConfig:
     openrouter_timeout_seconds: float = OPENROUTER_TIMEOUT_SECONDS
     openrouter_max_transient_retries: int = OPENROUTER_MAX_TRANSIENT_RETRIES
     openrouter_max_retry_after_seconds: float = OPENROUTER_MAX_RETRY_AFTER_SECONDS
+    openrouter_fallback_models: list[str] = field(
+        default_factory=lambda: parse_openrouter_fallback_models(
+            OPENROUTER_REASONER_FALLBACK_MODELS,
+        ),
+    )
 
     def __post_init__(self) -> None:
         if self.max_new_tokens <= 0:
@@ -263,6 +284,16 @@ class TemporalReasonerConfig:
             raise ValueError("openrouter_timeout_seconds must be > 0")
         if self.openrouter_max_transient_retries < 0:
             raise ValueError("openrouter_max_transient_retries must be >= 0")
+        # Normalize fallback model list (immutable dataclass → tuple-ish list copy).
+        cleaned_fallbacks: list[str] = []
+        seen_fb: set[str] = set()
+        for model in self.openrouter_fallback_models or []:
+            name = str(model).strip()
+            if not name or name in seen_fb:
+                continue
+            cleaned_fallbacks.append(name)
+            seen_fb.add(name)
+        object.__setattr__(self, "openrouter_fallback_models", cleaned_fallbacks)
 
 
 def evaluation_reasoner_config(
@@ -307,6 +338,7 @@ def resolve_temporal_reasoner_config(
     - ``TEMPORAL_REASONER_PROVIDER`` (default openrouter)
     - ``TEMPORAL_REASONER_FALLBACK`` (default none)
     - ``OPENROUTER_REASONER_MODEL`` (default google/gemma-4-26b-a4b-it:free)
+    - ``OPENROUTER_REASONER_FALLBACK_MODELS`` (default dots-studio/dots-3-note-preview:free)
     - ``OPENROUTER_API_KEY`` is read at request time, not stored on this object
     """
     provider = (
@@ -321,6 +353,12 @@ def resolve_temporal_reasoner_config(
         os.environ.get("OPENROUTER_REASONER_MODEL", OPENROUTER_REASONER_MODEL)
         or OPENROUTER_REASONER_MODEL
     ).strip()
+    openrouter_fallback_models = parse_openrouter_fallback_models(
+        os.environ.get(
+            "OPENROUTER_REASONER_FALLBACK_MODELS",
+            OPENROUTER_REASONER_FALLBACK_MODELS,
+        ),
+    )
     if provider == "qwen_local_or_zerogpu":
         model_id = TEMPORAL_REASONER_QWEN_MODEL
     else:
@@ -331,6 +369,7 @@ def resolve_temporal_reasoner_config(
         "fallback": fallback,
         "model_id": model_id,
         "qwen_model_id": TEMPORAL_REASONER_QWEN_MODEL,
+        "openrouter_fallback_models": openrouter_fallback_models,
     }
     if overrides:
         kwargs.update(dict(overrides))

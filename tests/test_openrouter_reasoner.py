@@ -19,9 +19,11 @@ for path in (ROOT, TESTS):
 
 from src.config import (
     OPENROUTER_API_URL,
+    OPENROUTER_REASONER_FALLBACK_MODELS,
     OPENROUTER_REASONER_MODEL,
     TemporalReasonerConfig,
     evaluation_reasoner_config,
+    parse_openrouter_fallback_models,
     resolve_temporal_reasoner_config,
 )
 from src.routing.input_router import CapabilityStatus, InputType, RoutedAnalysisResult
@@ -152,20 +154,40 @@ def _fake_http_response(payload: dict, *, status: int = 200) -> SimpleNamespace:
 
 def test_openrouter_model_id_default() -> None:
     assert OPENROUTER_REASONER_MODEL == "google/gemma-4-26b-a4b-it:free"
+    assert OPENROUTER_REASONER_FALLBACK_MODELS == "dots-studio/dots-3-note-preview:free"
     cfg = resolve_temporal_reasoner_config()
     assert cfg.provider == "openrouter"
     assert cfg.model_id == "google/gemma-4-26b-a4b-it:free"
+    assert cfg.openrouter_fallback_models == ["dots-studio/dots-3-note-preview:free"]
     assert cfg.fallback == "none"
     assert "gpt-oss" not in cfg.model_id
     assert cfg.model_id != "openrouter/free"
+    for mid in [cfg.model_id, *cfg.openrouter_fallback_models]:
+        assert ":free" in mid
+        assert "gpt-oss" not in mid
 
 
 def test_openrouter_model_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OPENROUTER_REASONER_MODEL", "some-other/free-model")
+    monkeypatch.setenv(
+        "OPENROUTER_REASONER_FALLBACK_MODELS",
+        "alt/free-a, alt/free-b",
+    )
     cfg = resolve_temporal_reasoner_config()
     assert cfg.model_id == "some-other/free-model"
     assert cfg.model_id != "openai/gpt-oss-20b"
     assert cfg.model_id != "google/gemma-4-26b-a4b-it:free"
+    assert cfg.openrouter_fallback_models == ["alt/free-a", "alt/free-b"]
+
+
+def test_parse_openrouter_fallback_models() -> None:
+    assert parse_openrouter_fallback_models("") == []
+    assert parse_openrouter_fallback_models(
+        "dots-studio/dots-3-note-preview:free, other/free",
+    ) == ["dots-studio/dots-3-note-preview:free", "other/free"]
+    assert parse_openrouter_fallback_models(
+        "a:free, a:free, b:free",
+    ) == ["a:free", "b:free"]
 
 
 def test_openrouter_request_shape_and_auth_header(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -195,17 +217,13 @@ def test_openrouter_request_shape_and_auth_header(monkeypatch: pytest.MonkeyPatc
         system=OPENROUTER_SYSTEM_INSTRUCTION,
         user="hello",
         max_tokens=768,
+        fallback_models=["dots-studio/dots-3-note-preview:free"],
     )
     assert body["model"] == "google/gemma-4-26b-a4b-it:free"
+    assert body["models"] == ["dots-studio/dots-3-note-preview:free"]
     assert body["response_format"]["type"] == "json_object"
     assert "json_schema" not in body["response_format"]
     assert body["provider"]["require_parameters"] is True
-    assert "Exactly ONE JSON object" in OPENROUTER_SYSTEM_INSTRUCTION or (
-        "exactly ONE JSON object" in OPENROUTER_SYSTEM_INSTRUCTION
-    )
-    assert "No markdown" in OPENROUTER_SYSTEM_INSTRUCTION
-    assert "TemporalReasoningResult" in OPENROUTER_SYSTEM_INSTRUCTION
-    assert "summary" in OPENROUTER_SYSTEM_INSTRUCTION
     assert set(OPENROUTER_TEMPORAL_REASONING_SCHEMA["required"]) == {
         "summary",
         "trajectory_explanation",
@@ -216,6 +234,12 @@ def test_openrouter_request_shape_and_auth_header(monkeypatch: pytest.MonkeyPatc
         "uncertainties",
         "confidence",
     }
+    assert "Exactly ONE JSON object" in OPENROUTER_SYSTEM_INSTRUCTION or (
+        "exactly ONE JSON object" in OPENROUTER_SYSTEM_INSTRUCTION
+    )
+    assert "No markdown" in OPENROUTER_SYSTEM_INSTRUCTION
+    assert "TemporalReasoningResult" in OPENROUTER_SYSTEM_INSTRUCTION
+    assert "summary" in OPENROUTER_SYSTEM_INSTRUCTION
 
     resp = post_openrouter_chat_completion(
         body,
@@ -227,6 +251,7 @@ def test_openrouter_request_shape_and_auth_header(monkeypatch: pytest.MonkeyPatc
     assert captured["headers"]["authorization"] == "Bearer test-secret-key-do-not-log"
     assert captured["headers"]["content-type"] == "application/json"
     assert captured["body"]["model"] == "google/gemma-4-26b-a4b-it:free"
+    assert captured["body"]["models"] == ["dots-studio/dots-3-note-preview:free"]
     assert captured["body"]["response_format"]["type"] == "json_object"
     assert "json_schema" not in captured["body"]["response_format"]
     assert captured["body"]["provider"]["require_parameters"] is True
@@ -321,6 +346,7 @@ def test_routed_model_recorded_when_returned(monkeypatch: pytest.MonkeyPatch) ->
 
     def fake_post(body, *, api_key, api_url, timeout_seconds):  # noqa: ANN001
         assert body["model"] == "google/gemma-4-26b-a4b-it:free"
+        assert body["models"] == ["dots-studio/dots-3-note-preview:free"]
         assert "gpt-oss-20b" not in body["model"]
         assert body["response_format"]["type"] == "json_object"
         return {
@@ -343,6 +369,78 @@ def test_routed_model_recorded_when_returned(monkeypatch: pytest.MonkeyPatch) ->
     assert (diag.generation_kwargs or {}).get("requested_model") == (
         "google/gemma-4-26b-a4b-it:free"
     )
+    assert (diag.generation_kwargs or {}).get("fallback_models") == [
+        "dots-studio/dots-3-note-preview:free",
+    ]
+
+
+def test_fallback_model_can_satisfy_successful_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """OpenRouter may serve via native models[] fallback; record that routed id."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k")
+    reasoner = OpenRouterTemporalReasoner(_openrouter_cfg())
+    ctx = fixture_stable_neutral()
+    evidence = build_evidence_payload(ctx, config=_openrouter_cfg())
+    eid = evidence["valid_evidence_ids"][0]
+    raw = _valid_reasoning_json(
+        evidence=[{"evidence_id": eid, "explanation": "ok"}],
+        important_transitions=[],
+    )
+
+    def fake_post(body, *, api_key, api_url, timeout_seconds):  # noqa: ANN001
+        assert body["model"] == "google/gemma-4-26b-a4b-it:free"
+        assert body["models"] == ["dots-studio/dots-3-note-preview:free"]
+        return {
+            "id": "gen-fb",
+            "model": "dots-studio/dots-3-note-preview:free",
+            "choices": [{"message": {"content": raw}}],
+            "usage": {"prompt_tokens": 2, "completion_tokens": 3},
+        }
+
+    monkeypatch.setattr(
+        "src.temporal.providers.openrouter.post_openrouter_chat_completion",
+        fake_post,
+    )
+    result, diag = reasoner.reason(ctx)
+    assert result.status == "ok"
+    assert diag.openrouter_routed_model == "dots-studio/dots-3-note-preview:free"
+    assert result.model == "dots-studio/dots-3-note-preview:free"
+    assert result.model != "google/gemma-4-26b-a4b-it:free"
+    assert (diag.generation_kwargs or {}).get("requested_model") == (
+        "google/gemma-4-26b-a4b-it:free"
+    )
+
+
+def test_all_models_failed_fail_soft(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k")
+    reasoner = OpenRouterTemporalReasoner(_openrouter_cfg())
+    ctx = fixture_stable_neutral()
+    traj = ctx.features.trajectory
+
+    def boom(*_a, **_k):  # noqa: ANN001
+        raise OpenRouterError(
+            "All models failed / rate limited",
+            status_code=429,
+            retryable=False,
+            error_kind="rate_limit",
+            failure_stage="http_response",
+        )
+
+    monkeypatch.setattr(reasoner, "_generate_with_retry", boom)
+    result, diag = reasoner.reason(ctx)
+    assert result.status == "generation_failed"
+    assert ctx.features.trajectory == traj
+    assert diag.provider == "openrouter"
+    assert resolve_temporal_reasoner_config().fallback == "none"
+    assert "openai/gpt-oss" not in json.dumps(result.model_dump())
+    final = build_final_temporal_assessment(
+        ctx,
+        result,
+        model_id=OPENROUTER_REASONER_MODEL,
+    )
+    assert final.status == "explanation_unavailable"
+    assert CONTEXT_UNAVAILABLE_MESSAGE in final.uncertainty_note
 
 
 def test_404_model_unavailable_fail_soft(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -389,16 +487,22 @@ def test_no_paid_gpt_oss_fallback_in_defaults() -> None:
     assert cfg.model_id != "openai/gpt-oss-20b"
     assert "gpt-oss-20b" not in cfg.model_id
     assert cfg.model_id != "openrouter/free"
+    assert cfg.openrouter_fallback_models == ["dots-studio/dots-3-note-preview:free"]
     body = build_openrouter_request_body(
         model_id=cfg.model_id,
         system=OPENROUTER_SYSTEM_INSTRUCTION,
         user="x",
         max_tokens=16,
+        fallback_models=cfg.openrouter_fallback_models,
     )
     assert body["model"] == "google/gemma-4-26b-a4b-it:free"
+    assert body["models"] == ["dots-studio/dots-3-note-preview:free"]
     assert body["response_format"]["type"] == "json_object"
     assert "json_schema" not in body["response_format"]
     assert body["provider"]["require_parameters"] is True
+    joined = json.dumps(body)
+    assert "gpt-oss" not in joined
+    assert "openrouter/free" not in joined
 
 
 def test_missing_key_fail_soft(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1077,10 +1181,12 @@ def test_request_payload_json_serializable_real_fixture() -> None:
         system=OPENROUTER_SYSTEM_INSTRUCTION,
         user=user,
         max_tokens=768,
+        fallback_models=["dots-studio/dots-3-note-preview:free"],
     )
     raw = assert_json_serializable(body)
     parsed = json.loads(raw.decode("utf-8"))
     assert parsed["model"] == OPENROUTER_REASONER_MODEL
+    assert parsed["models"] == ["dots-studio/dots-3-note-preview:free"]
     assert parsed["response_format"]["type"] == "json_object"
     assert "json_schema" not in parsed["response_format"]
     assert parsed["provider"]["require_parameters"] is True

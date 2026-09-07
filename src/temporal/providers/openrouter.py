@@ -25,7 +25,7 @@ import urllib.error
 import urllib.request
 from datetime import date, datetime
 from enum import Enum
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 
 from src.config import DEFAULT_TEMPORAL_REASONER, TemporalReasonerConfig
 from src.schemas import (
@@ -149,19 +149,41 @@ class OpenRouterError(Exception):
         self.response_body_preview = response_body_preview
 
 
+def normalize_openrouter_fallback_models(
+    fallback_models: Optional[Sequence[str]],
+    *,
+    primary: str,
+) -> list[str]:
+    """Deduplicate fallbacks and exclude the primary model id."""
+    primary_id = (primary or "").strip()
+    seen: set[str] = {primary_id} if primary_id else set()
+    out: list[str] = []
+    for model in fallback_models or []:
+        cleaned = str(model).strip()
+        if not cleaned or cleaned in seen:
+            continue
+        out.append(cleaned)
+        seen.add(cleaned)
+    return out
+
+
 def build_openrouter_request_body(
     *,
     model_id: str,
     system: str,
     user: str,
     max_tokens: int,
+    fallback_models: Optional[Sequence[str]] = None,
 ) -> dict[str, Any]:
     """Exact Chat Completions payload shape for the temporal reasoner.
 
     Free-model path uses ``json_object`` (not remote json_schema). Strict
     TemporalReasoningResult validation remains local after the response.
+
+    OpenRouter native ``models`` lists free-model fallbacks tried when the
+    primary is rate-limited or unavailable (no client-side model fan-out).
     """
-    return {
+    body: dict[str, Any] = {
         "model": model_id,
         "messages": [
             {"role": "system", "content": system},
@@ -176,6 +198,10 @@ def build_openrouter_request_body(
             "require_parameters": True,
         },
     }
+    models = normalize_openrouter_fallback_models(fallback_models, primary=model_id)
+    if models:
+        body["models"] = models
+    return body
 
 
 def _parse_retry_after(headers: Any, *, max_wait: float) -> Optional[float]:
@@ -585,11 +611,13 @@ class OpenRouterTemporalReasoner:
             # Ensure evidence itself is JSON-serializable before embedding.
             evidence = to_jsonable(evidence)
             user_prompt = build_user_prompt(evidence)
+            fallback_models = list(self.config.openrouter_fallback_models or [])
             body = build_openrouter_request_body(
                 model_id=self.config.model_id,
                 system=OPENROUTER_SYSTEM_INSTRUCTION,
                 user=user_prompt,
                 max_tokens=int(self.config.max_new_tokens),
+                fallback_models=fallback_models,
             )
             # Preflight serialize (catches schema / numpy / set issues before I/O).
             assert_json_serializable(body)
@@ -629,9 +657,14 @@ class OpenRouterTemporalReasoner:
         ]
 
         # Safe meta only — never store Authorization or API key.
+        fallback_models = normalize_openrouter_fallback_models(
+            self.config.openrouter_fallback_models,
+            primary=self.config.model_id,
+        )
         diagnostics.generation_kwargs = {
             "model": self.config.model_id,
             "requested_model": self.config.model_id,
+            "fallback_models": fallback_models,
             "api_url": self.config.openrouter_api_url,
             "response_format_type": "json_object",
             "provider_require_parameters": True,
@@ -774,6 +807,7 @@ class OpenRouterTemporalReasoner:
                 system=OPENROUTER_SYSTEM_INSTRUCTION,
                 user=repair_user,
                 max_tokens=int(self.config.max_new_tokens),
+                fallback_models=list(self.config.openrouter_fallback_models or []),
             )
             try:
                 repair_started = time.perf_counter()
