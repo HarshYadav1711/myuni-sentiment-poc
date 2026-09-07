@@ -127,7 +127,10 @@ def test_openrouter_defaults_in_bundle(deploy_ready: Path) -> None:
     cfg = (deploy_ready / "src" / "config.py").read_text(encoding="utf-8")
     assert 'TEMPORAL_REASONER_PROVIDER = "openrouter"' in cfg
     assert 'TEMPORAL_REASONER_FALLBACK = "none"' in cfg
-    assert 'OPENROUTER_REASONER_MODEL = "openai/gpt-oss-20b:free"' in cfg
+    assert 'OPENROUTER_REASONER_MODEL = "google/gemma-4-26b-a4b-it:free"' in cfg
+    assert "openai/gpt-oss-20b:free" not in cfg
+    assert 'OPENROUTER_REASONER_MODEL = "openrouter/free"' not in cfg
+    assert 'TEMPORAL_REASONER_FALLBACK = "none"' in cfg
     assert "OPENROUTER_API_KEY" in cfg or "OPENROUTER_API_KEY" in (
         deploy_ready / "src" / "temporal" / "providers" / "openrouter.py"
     ).read_text(encoding="utf-8")
@@ -179,7 +182,7 @@ def test_qwen_not_default_provider(deploy_ready: Path) -> None:
         ")\n"
         "assert TEMPORAL_REASONER_PROVIDER == 'openrouter'\n"
         "assert TEMPORAL_REASONER_FALLBACK == 'none'\n"
-        "assert OPENROUTER_REASONER_MODEL == 'openai/gpt-oss-20b:free'\n"
+        "assert OPENROUTER_REASONER_MODEL == 'google/gemma-4-26b-a4b-it:free'\n"
         "cfg = resolve_temporal_reasoner_config()\n"
         "assert cfg.provider == 'openrouter'\n"
         "assert cfg.fallback == 'none'\n"

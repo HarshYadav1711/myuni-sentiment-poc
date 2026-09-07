@@ -37,13 +37,11 @@ from src.schemas import (
 from src.temporal.parse import format_validation_error, parse_reasoning_result
 from src.temporal.prompt import (
     build_evidence_payload,
+    build_repair_prompt,
     build_user_prompt,
     collect_valid_evidence_ids,
 )
-from src.temporal.providers.openrouter_schema import (
-    OPENROUTER_SYSTEM_INSTRUCTION,
-    OPENROUTER_TEMPORAL_REASONING_SCHEMA,
-)
+from src.temporal.providers.openrouter_schema import OPENROUTER_SYSTEM_INSTRUCTION
 from src.temporal.reasoner import _safe_error_message
 
 logger = logging.getLogger(__name__)
@@ -158,7 +156,11 @@ def build_openrouter_request_body(
     user: str,
     max_tokens: int,
 ) -> dict[str, Any]:
-    """Exact Chat Completions payload shape for the temporal reasoner."""
+    """Exact Chat Completions payload shape for the temporal reasoner.
+
+    Free-model path uses ``json_object`` (not remote json_schema). Strict
+    TemporalReasoningResult validation remains local after the response.
+    """
     return {
         "model": model_id,
         "messages": [
@@ -168,12 +170,7 @@ def build_openrouter_request_body(
         "max_tokens": int(max_tokens),
         "temperature": 0.0,
         "response_format": {
-            "type": "json_schema",
-            "json_schema": {
-                "name": "temporal_reasoning_result",
-                "strict": True,
-                "schema": OPENROUTER_TEMPORAL_REASONING_SCHEMA,
-            },
+            "type": "json_object",
         },
         "provider": {
             "require_parameters": True,
@@ -310,6 +307,22 @@ def post_openrouter_chat_completion(
                 failure_stage="http_response",
                 response_body_preview=preview,
             ) from exc
+        if status == 404 or (
+            status == 400
+            and (
+                "unavailable for free" in body_lower
+                or "model is unavailable" in body_lower
+                or "no endpoints found" in body_lower
+            )
+        ):
+            raise OpenRouterError(
+                f"OpenRouter model unavailable ({status}): {preview or 'no body'}",
+                status_code=status,
+                retryable=False,
+                error_kind="model_unavailable",
+                failure_stage="http_response",
+                response_body_preview=preview,
+            ) from exc
         if status == 400 and (
             "response_format" in body_lower
             or "json_schema" in body_lower
@@ -410,6 +423,19 @@ def post_openrouter_chat_completion(
             failure_stage="response_parse",
         )
     return data
+
+
+def extract_routed_model(response: dict[str, Any]) -> Optional[str]:
+    """Return the actual model OpenRouter reports, if present.
+
+    Does not invent a model ID. Prefer top-level ``model``; otherwise None.
+    """
+    model = response.get("model")
+    if isinstance(model, str):
+        cleaned = model.strip()
+        if cleaned:
+            return cleaned
+    return None
 
 
 def extract_message_content(response: dict[str, Any]) -> str:
@@ -605,9 +631,9 @@ class OpenRouterTemporalReasoner:
         # Safe meta only — never store Authorization or API key.
         diagnostics.generation_kwargs = {
             "model": self.config.model_id,
+            "requested_model": self.config.model_id,
             "api_url": self.config.openrouter_api_url,
-            "response_format_type": "json_schema",
-            "json_schema_strict": True,
+            "response_format_type": "json_object",
             "provider_require_parameters": True,
             "max_tokens": int(self.config.max_new_tokens),
             "method": "POST",
@@ -626,6 +652,10 @@ class OpenRouterTemporalReasoner:
                 diagnostics.prompt_tokens = int(usage["prompt_tokens"])
             if usage.get("completion_tokens") is not None:
                 diagnostics.generated_tokens = int(usage["completion_tokens"])
+            routed_model = http_meta.get("routed_model")
+            if isinstance(routed_model, str) and routed_model.strip():
+                diagnostics.openrouter_routed_model = routed_model.strip()
+            reported_model = diagnostics.openrouter_routed_model or self.config.model_id
         except OpenRouterError as exc:
             stage = exc.failure_stage or "unknown"
             logger.exception(
@@ -697,38 +727,169 @@ class OpenRouterTemporalReasoner:
             parse_started = time.perf_counter()
             result = parse_reasoning_result(
                 raw_text,
-                model_id=self.config.model_id,
+                model_id=reported_model,
                 valid_evidence_ids=valid_evidence_ids,
                 valid_window_ranges=valid_window_ranges,
             )
+            # Prefer OpenRouter-reported routed model over any model string in LLM JSON.
+            result = result.model_copy(update={"model": reported_model})
             diagnostics.parse_validation_seconds = time.perf_counter() - parse_started
             diagnostics.total_reasoner_seconds = time.perf_counter() - total_started
             return result, diagnostics
-        except Exception as exc:  # noqa: BLE001
-            logger.exception(
-                "OpenRouter schema_validation failed model=%s",
-                self.config.model_id,
+        except Exception as first_exc:  # noqa: BLE001
+            if int(self.config.max_retries) < 1:
+                logger.exception(
+                    "OpenRouter schema_validation failed model=%s",
+                    reported_model,
+                )
+                _apply_openrouter_failure(diagnostics, first_exc, stage="schema_validation")
+                diagnostics.total_reasoner_seconds = time.perf_counter() - total_started
+                return (
+                    TemporalReasoningResult(
+                        summary="",
+                        context_type="uncertain",
+                        confidence=0.0,
+                        model=reported_model,
+                        status="invalid_model_output",
+                        details={
+                            "error": format_validation_error(first_exc),
+                            "raw_preview": _redact(raw_text[:500]),
+                            "openrouter_failure_stage": "schema_validation",
+                            "openrouter_error_type": type(first_exc).__name__,
+                            "openrouter_error_message": sanitize_openrouter_error_message(
+                                first_exc,
+                            ),
+                            "provider": "openrouter",
+                        },
+                    ),
+                    diagnostics,
+                )
+
+            repair_user = build_repair_prompt(
+                validation_error=format_validation_error(first_exc),
+                previous_output=raw_text,
             )
-            _apply_openrouter_failure(diagnostics, exc, stage="schema_validation")
-            diagnostics.total_reasoner_seconds = time.perf_counter() - total_started
-            return (
-                TemporalReasoningResult(
-                    summary="",
-                    context_type="uncertain",
-                    confidence=0.0,
-                    model=self.config.model_id,
-                    status="invalid_model_output",
-                    details={
-                        "error": format_validation_error(exc),
-                        "raw_preview": _redact(raw_text[:500]),
-                        "openrouter_failure_stage": "schema_validation",
-                        "openrouter_error_type": type(exc).__name__,
-                        "openrouter_error_message": sanitize_openrouter_error_message(exc),
-                        "provider": "openrouter",
-                    },
-                ),
-                diagnostics,
+            repair_body = build_openrouter_request_body(
+                model_id=self.config.model_id,
+                system=OPENROUTER_SYSTEM_INSTRUCTION,
+                user=repair_user,
+                max_tokens=int(self.config.max_new_tokens),
             )
+            try:
+                repair_started = time.perf_counter()
+                raw_retry, repair_meta = self._generate_with_retry(
+                    repair_body,
+                    api_key=api_key,
+                )
+                repair_s = time.perf_counter() - repair_started
+                diagnostics.repair_attempted = True
+                diagnostics.repair_generation_seconds = repair_s
+                diagnostics.generation_seconds = (
+                    diagnostics.generation_seconds or 0.0
+                ) + repair_s
+                diagnostics.raw_output_preview = _redact(raw_retry[:500])
+                if repair_meta.get("http_status") is not None:
+                    diagnostics.http_status = repair_meta.get("http_status")
+                    diagnostics.openrouter_http_status = repair_meta.get("http_status")
+                routed_repair = repair_meta.get("routed_model")
+                if isinstance(routed_repair, str) and routed_repair.strip():
+                    diagnostics.openrouter_routed_model = routed_repair.strip()
+                    reported_model = diagnostics.openrouter_routed_model
+            except Exception as repair_gen_exc:  # noqa: BLE001
+                diagnostics.repair_attempted = True
+                diagnostics.repair_generation_seconds = (
+                    time.perf_counter() - repair_started
+                )
+                logger.exception(
+                    "OpenRouter repair generation failed model=%s",
+                    reported_model,
+                )
+                stage = (
+                    repair_gen_exc.failure_stage
+                    if isinstance(repair_gen_exc, OpenRouterError)
+                    else "unknown"
+                )
+                _apply_openrouter_failure(diagnostics, repair_gen_exc, stage=stage)
+                diagnostics.total_reasoner_seconds = time.perf_counter() - total_started
+                status = "generation_failed"
+                if isinstance(repair_gen_exc, OpenRouterError) and repair_gen_exc.error_kind in {
+                    "auth",
+                    "connection",
+                    "ssl",
+                    "free_endpoint_unavailable",
+                }:
+                    status = "reasoner_unavailable"
+                return (
+                    TemporalReasoningResult(
+                        summary="",
+                        context_type="uncertain",
+                        confidence=0.0,
+                        model=reported_model,
+                        status=status,
+                        details={
+                            "error": (
+                                "repair_generation_failed: "
+                                f"{sanitize_openrouter_error_message(repair_gen_exc)}"
+                            ),
+                            "first_error": format_validation_error(first_exc),
+                            "openrouter_failure_stage": stage,
+                            "openrouter_error_type": type(repair_gen_exc).__name__,
+                            "openrouter_error_message": sanitize_openrouter_error_message(
+                                repair_gen_exc,
+                            ),
+                            "provider": "openrouter",
+                        },
+                    ),
+                    diagnostics,
+                )
+
+            try:
+                parse_started = time.perf_counter()
+                result = parse_reasoning_result(
+                    raw_retry,
+                    model_id=reported_model,
+                    valid_evidence_ids=valid_evidence_ids,
+                    valid_window_ranges=valid_window_ranges,
+                )
+                result = result.model_copy(update={"model": reported_model})
+                diagnostics.parse_validation_seconds = (
+                    diagnostics.parse_validation_seconds or 0.0
+                ) + (time.perf_counter() - parse_started)
+                diagnostics.total_reasoner_seconds = time.perf_counter() - total_started
+                return result, diagnostics
+            except Exception as second_exc:  # noqa: BLE001
+                logger.exception(
+                    "OpenRouter schema_validation failed after repair model=%s",
+                    reported_model,
+                )
+                _apply_openrouter_failure(
+                    diagnostics,
+                    second_exc,
+                    stage="schema_validation",
+                )
+                diagnostics.total_reasoner_seconds = time.perf_counter() - total_started
+                return (
+                    TemporalReasoningResult(
+                        summary="",
+                        context_type="uncertain",
+                        confidence=0.0,
+                        model=reported_model,
+                        status="invalid_model_output",
+                        details={
+                            "error": format_validation_error(second_exc),
+                            "first_error": format_validation_error(first_exc),
+                            "raw_preview": _redact(raw_retry[:500]),
+                            "openrouter_failure_stage": "schema_validation",
+                            "openrouter_error_type": type(second_exc).__name__,
+                            "openrouter_error_message": sanitize_openrouter_error_message(
+                                second_exc,
+                            ),
+                            "provider": "openrouter",
+                            "repair_attempted": True,
+                        },
+                    ),
+                    diagnostics,
+                )
 
     def _generate_with_retry(
         self,
@@ -751,11 +912,13 @@ class OpenRouterTemporalReasoner:
                 )
                 content = extract_message_content(response)
                 usage = response.get("usage") if isinstance(response.get("usage"), dict) else {}
+                routed = extract_routed_model(response)
                 return content, {
                     "http_status": 200,
                     "retry_attempted": retry_attempted,
                     "generation_seconds": time.perf_counter() - started,
                     "usage": usage,
+                    "routed_model": routed,
                 }
             except OpenRouterError as exc:
                 can_retry = (

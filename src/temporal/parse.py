@@ -9,16 +9,20 @@ from typing import Any, Optional
 from pydantic import ValidationError
 
 from src.schemas import TemporalReasoningResult
+from src.temporal.providers.openrouter_schema import OPENROUTER_TEMPORAL_REASONING_SCHEMA
 
 _FENCE_RE = re.compile(r"```(?:json)?\s*([\s\S]*?)\s*```", re.IGNORECASE)
+
+MODEL_OUTPUT_REQUIRED_FIELDS: tuple[str, ...] = tuple(
+    OPENROUTER_TEMPORAL_REASONING_SCHEMA["required"],
+)
 
 
 def extract_json_object(text: str) -> str:
     """Extract the outermost JSON object from model text.
 
-    Primary path expects raw JSON. A single markdown fence unwrap is allowed
-    as a convenience; arbitrary prose regex parsing is not used as the
-    primary contract.
+    Compatibility fallback only. Primary path prefers direct ``json.loads``.
+    A single markdown fence unwrap is allowed; arbitrary prose scraping is not.
     """
     cleaned = (text or "").strip()
     if not cleaned:
@@ -38,6 +42,35 @@ def extract_json_object(text: str) -> str:
     raise ValueError("no JSON object found in model output")
 
 
+def _loads_model_json(text: str) -> Any:
+    """Prefer direct json.loads; fall back to bounded object extraction."""
+    cleaned = (text or "").strip()
+    if not cleaned:
+        raise ValueError("empty model output")
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        raw = extract_json_object(text)
+        return json.loads(raw)
+
+
+def assert_required_model_fields(data: dict[str, Any]) -> None:
+    """Fail when schema-required top-level keys are absent (before defaults fill)."""
+    missing = [key for key in MODEL_OUTPUT_REQUIRED_FIELDS if key not in data]
+    if missing:
+        raise ValueError(f"missing required field(s): {missing}")
+    cmc = data.get("cross_modal_context")
+    if isinstance(cmc, dict):
+        cmc_required = OPENROUTER_TEMPORAL_REASONING_SCHEMA["properties"][
+            "cross_modal_context"
+        ]["required"]
+        missing_cmc = [key for key in cmc_required if key not in cmc]
+        if missing_cmc:
+            raise ValueError(
+                f"missing required cross_modal_context field(s): {missing_cmc}",
+            )
+
+
 def parse_reasoning_result(
     text: str,
     *,
@@ -46,10 +79,10 @@ def parse_reasoning_result(
     valid_window_ranges: Optional[list[tuple[float, float]]] = None,
 ) -> TemporalReasoningResult:
     """Parse model text into TemporalReasoningResult or raise ValidationError/ValueError."""
-    raw = extract_json_object(text)
-    data: Any = json.loads(raw)
+    data: Any = _loads_model_json(text)
     if not isinstance(data, dict):
         raise ValueError("JSON root must be an object")
+    assert_required_model_fields(data)
     if model_id and "model" not in data:
         data = {**data, "model": model_id}
     if "status" not in data:

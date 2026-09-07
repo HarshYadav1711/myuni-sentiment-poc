@@ -151,11 +151,21 @@ def _fake_http_response(payload: dict, *, status: int = 200) -> SimpleNamespace:
 
 
 def test_openrouter_model_id_default() -> None:
-    assert OPENROUTER_REASONER_MODEL == "openai/gpt-oss-20b:free"
+    assert OPENROUTER_REASONER_MODEL == "google/gemma-4-26b-a4b-it:free"
     cfg = resolve_temporal_reasoner_config()
     assert cfg.provider == "openrouter"
-    assert cfg.model_id == "openai/gpt-oss-20b:free"
+    assert cfg.model_id == "google/gemma-4-26b-a4b-it:free"
     assert cfg.fallback == "none"
+    assert "gpt-oss" not in cfg.model_id
+    assert cfg.model_id != "openrouter/free"
+
+
+def test_openrouter_model_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OPENROUTER_REASONER_MODEL", "some-other/free-model")
+    cfg = resolve_temporal_reasoner_config()
+    assert cfg.model_id == "some-other/free-model"
+    assert cfg.model_id != "openai/gpt-oss-20b"
+    assert cfg.model_id != "google/gemma-4-26b-a4b-it:free"
 
 
 def test_openrouter_request_shape_and_auth_header(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -186,11 +196,26 @@ def test_openrouter_request_shape_and_auth_header(monkeypatch: pytest.MonkeyPatc
         user="hello",
         max_tokens=768,
     )
-    assert body["model"] == "openai/gpt-oss-20b:free"
-    assert body["response_format"]["type"] == "json_schema"
-    assert body["response_format"]["json_schema"]["strict"] is True
-    assert body["response_format"]["json_schema"]["schema"] == OPENROUTER_TEMPORAL_REASONING_SCHEMA
+    assert body["model"] == "google/gemma-4-26b-a4b-it:free"
+    assert body["response_format"]["type"] == "json_object"
+    assert "json_schema" not in body["response_format"]
     assert body["provider"]["require_parameters"] is True
+    assert "Exactly ONE JSON object" in OPENROUTER_SYSTEM_INSTRUCTION or (
+        "exactly ONE JSON object" in OPENROUTER_SYSTEM_INSTRUCTION
+    )
+    assert "No markdown" in OPENROUTER_SYSTEM_INSTRUCTION
+    assert "TemporalReasoningResult" in OPENROUTER_SYSTEM_INSTRUCTION
+    assert "summary" in OPENROUTER_SYSTEM_INSTRUCTION
+    assert set(OPENROUTER_TEMPORAL_REASONING_SCHEMA["required"]) == {
+        "summary",
+        "trajectory_explanation",
+        "cross_modal_context",
+        "important_transitions",
+        "context_type",
+        "evidence",
+        "uncertainties",
+        "confidence",
+    }
 
     resp = post_openrouter_chat_completion(
         body,
@@ -201,8 +226,9 @@ def test_openrouter_request_shape_and_auth_header(monkeypatch: pytest.MonkeyPatc
     assert captured["url"] == OPENROUTER_API_URL
     assert captured["headers"]["authorization"] == "Bearer test-secret-key-do-not-log"
     assert captured["headers"]["content-type"] == "application/json"
-    assert captured["body"]["model"] == "openai/gpt-oss-20b:free"
-    assert captured["body"]["response_format"]["json_schema"]["strict"] is True
+    assert captured["body"]["model"] == "google/gemma-4-26b-a4b-it:free"
+    assert captured["body"]["response_format"]["type"] == "json_object"
+    assert "json_schema" not in captured["body"]["response_format"]
     assert captured["body"]["provider"]["require_parameters"] is True
     assert "choices" in resp
     # Verify POST semantics on the Request object via captured call.
@@ -244,7 +270,8 @@ def test_successful_structured_result(monkeypatch: pytest.MonkeyPatch) -> None:
 
     def fake_gen(body, *, api_key):  # noqa: ANN001
         assert body["model"] == OPENROUTER_REASONER_MODEL
-        assert body["response_format"]["json_schema"]["strict"] is True
+        assert body["response_format"]["type"] == "json_object"
+        assert "json_schema" not in body["response_format"]
         return _valid_reasoning_json(evidence_ids_ok=True), {
             "http_status": 200,
             "retry_attempted": False,
@@ -279,6 +306,99 @@ def test_successful_structured_result(monkeypatch: pytest.MonkeyPatch) -> None:
     assert result.model == OPENROUTER_REASONER_MODEL
     assert diag.provider == "openrouter"
     assert result.context_type == "personal_expression"
+
+
+def test_routed_model_recorded_when_returned(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k")
+    reasoner = OpenRouterTemporalReasoner(_openrouter_cfg())
+    ctx = fixture_stable_neutral()
+    evidence = build_evidence_payload(ctx, config=_openrouter_cfg())
+    eid = evidence["valid_evidence_ids"][0]
+    raw = _valid_reasoning_json(
+        evidence=[{"evidence_id": eid, "explanation": "ok"}],
+        important_transitions=[],
+    )
+
+    def fake_post(body, *, api_key, api_url, timeout_seconds):  # noqa: ANN001
+        assert body["model"] == "google/gemma-4-26b-a4b-it:free"
+        assert "gpt-oss-20b" not in body["model"]
+        assert body["response_format"]["type"] == "json_object"
+        return {
+            "id": "gen-1",
+            "model": "google/gemma-4-26b-a4b-it",
+            "choices": [{"message": {"content": raw}}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 2},
+        }
+
+    monkeypatch.setattr(
+        "src.temporal.providers.openrouter.post_openrouter_chat_completion",
+        fake_post,
+    )
+    result, diag = reasoner.reason(ctx)
+    assert result.status == "ok"
+    assert diag.openrouter_routed_model == "google/gemma-4-26b-a4b-it"
+    assert result.model == "google/gemma-4-26b-a4b-it"
+    assert result.model != "openai/gpt-oss-20b"
+    assert result.model != "openai/gpt-oss-20b:free"
+    assert (diag.generation_kwargs or {}).get("requested_model") == (
+        "google/gemma-4-26b-a4b-it:free"
+    )
+
+
+def test_404_model_unavailable_fail_soft(monkeypatch: pytest.MonkeyPatch) -> None:
+    import io
+    import urllib.error
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k")
+    reasoner = OpenRouterTemporalReasoner(_openrouter_cfg())
+    err = urllib.error.HTTPError(
+        OPENROUTER_API_URL,
+        404,
+        "Not Found",
+        hdrs={},  # type: ignore[arg-type]
+        fp=io.BytesIO(
+            b'{"error":{"message":"This model is unavailable for free. '
+            b'The paid version is available now - use this slug instead: openai/gpt-oss-20b","code":404}}'
+        ),
+    )
+
+    def boom(*_a, **_k):  # noqa: ANN001
+        raise err
+
+    monkeypatch.setattr(
+        "src.temporal.providers.openrouter.urllib.request.urlopen",
+        boom,
+    )
+    traj = fixture_stable_neutral().features.trajectory
+    ctx = fixture_stable_neutral()
+    result, diag = reasoner.reason(ctx)
+    assert result.status == "generation_failed"
+    assert diag.openrouter_http_status == 404
+    assert diag.openrouter_failure_stage == "http_response"
+    assert result.details is not None
+    assert result.details.get("error_kind") == "model_unavailable"
+    # No paid fallback triggered.
+    assert ctx.features.trajectory == traj
+    assert "openai/gpt-oss-20b" not in (diag.generation_kwargs or {}).get("model", "")
+
+
+def test_no_paid_gpt_oss_fallback_in_defaults() -> None:
+    cfg = resolve_temporal_reasoner_config()
+    assert cfg.model_id == "google/gemma-4-26b-a4b-it:free"
+    assert cfg.fallback == "none"
+    assert cfg.model_id != "openai/gpt-oss-20b"
+    assert "gpt-oss-20b" not in cfg.model_id
+    assert cfg.model_id != "openrouter/free"
+    body = build_openrouter_request_body(
+        model_id=cfg.model_id,
+        system=OPENROUTER_SYSTEM_INSTRUCTION,
+        user="x",
+        max_tokens=16,
+    )
+    assert body["model"] == "google/gemma-4-26b-a4b-it:free"
+    assert body["response_format"]["type"] == "json_object"
+    assert "json_schema" not in body["response_format"]
+    assert body["provider"]["require_parameters"] is True
 
 
 def test_missing_key_fail_soft(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -398,8 +518,9 @@ def test_malformed_response_and_schema_validation(monkeypatch: pytest.MonkeyPatc
         )
 
     monkeypatch.setattr(reasoner, "_generate_with_retry", bad_json)
-    result, _ = reasoner.reason(fixture_stable_neutral())
+    result, diag = reasoner.reason(fixture_stable_neutral())
     assert result.status == "invalid_model_output"
+    assert diag.repair_attempted is True
 
     def bad_schema(*_a, **_k):  # noqa: ANN001
         return (
@@ -408,8 +529,185 @@ def test_malformed_response_and_schema_validation(monkeypatch: pytest.MonkeyPatc
         )
 
     monkeypatch.setattr(reasoner, "_generate_with_retry", bad_schema)
-    result2, _ = reasoner.reason(fixture_stable_neutral())
+    result2, diag2 = reasoner.reason(fixture_stable_neutral())
     assert result2.status == "invalid_model_output"
+    assert diag2.repair_attempted is True
+
+
+def test_plain_valid_json_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k")
+    reasoner = OpenRouterTemporalReasoner(_openrouter_cfg())
+    ctx = fixture_stable_neutral()
+    evidence = build_evidence_payload(ctx, config=_openrouter_cfg())
+    eid = evidence["valid_evidence_ids"][0]
+    raw = _valid_reasoning_json(
+        evidence=[{"evidence_id": eid, "explanation": "ok"}],
+        important_transitions=[],
+    )
+    assert not raw.startswith("```")
+
+    monkeypatch.setattr(
+        reasoner,
+        "_generate_with_retry",
+        lambda *_a, **_k: (
+            raw,
+            {"http_status": 200, "retry_attempted": False, "generation_seconds": 0.01, "usage": {}},
+        ),
+    )
+    result, diag = reasoner.reason(ctx)
+    assert result.status == "ok"
+    assert diag.repair_attempted is False
+
+
+def test_markdown_wrapped_json_compatibility_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k")
+    reasoner = OpenRouterTemporalReasoner(_openrouter_cfg())
+    ctx = fixture_stable_neutral()
+    evidence = build_evidence_payload(ctx, config=_openrouter_cfg())
+    eid = evidence["valid_evidence_ids"][0]
+    inner = _valid_reasoning_json(
+        evidence=[{"evidence_id": eid, "explanation": "ok"}],
+        important_transitions=[],
+    )
+    fenced = f"```json\n{inner}\n```"
+
+    monkeypatch.setattr(
+        reasoner,
+        "_generate_with_retry",
+        lambda *_a, **_k: (
+            fenced,
+            {"http_status": 200, "retry_attempted": False, "generation_seconds": 0.01, "usage": {}},
+        ),
+    )
+    result, _ = reasoner.reason(ctx)
+    assert result.status == "ok"
+
+
+def test_prose_only_response_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k")
+    reasoner = OpenRouterTemporalReasoner(_openrouter_cfg())
+
+    monkeypatch.setattr(
+        reasoner,
+        "_generate_with_retry",
+        lambda *_a, **_k: (
+            "The timeline looks stable with no notable transitions.",
+            {"http_status": 200, "retry_attempted": False, "generation_seconds": 0.01, "usage": {}},
+        ),
+    )
+    result, diag = reasoner.reason(fixture_stable_neutral())
+    assert result.status == "invalid_model_output"
+    assert diag.repair_attempted is True
+    assert "no JSON object" in (result.details or {}).get("error", "") or (
+        "no JSON object" in (result.details or {}).get("first_error", "")
+    )
+
+
+def test_missing_required_field_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k")
+    reasoner = OpenRouterTemporalReasoner(_openrouter_cfg())
+    incomplete = {
+        "summary": "Only a summary was returned.",
+        "trajectory_explanation": "stable_neutral",
+        # missing cross_modal_context and other required fields
+        "context_type": "personal_expression",
+        "confidence": 0.5,
+    }
+
+    monkeypatch.setattr(
+        reasoner,
+        "_generate_with_retry",
+        lambda *_a, **_k: (
+            json.dumps(incomplete),
+            {"http_status": 200, "retry_attempted": False, "generation_seconds": 0.01, "usage": {}},
+        ),
+    )
+    result, diag = reasoner.reason(fixture_stable_neutral())
+    assert result.status == "invalid_model_output"
+    assert diag.repair_attempted is True
+    err = str((result.details or {}).get("error", "")) + str(
+        (result.details or {}).get("first_error", ""),
+    )
+    assert "missing required field" in err
+
+
+def test_one_repair_retry_works(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k")
+    reasoner = OpenRouterTemporalReasoner(_openrouter_cfg())
+    ctx = fixture_stable_neutral()
+    evidence = build_evidence_payload(ctx, config=_openrouter_cfg())
+    eid = evidence["valid_evidence_ids"][0]
+    good = _valid_reasoning_json(
+        evidence=[{"evidence_id": eid, "explanation": "ok"}],
+        important_transitions=[],
+    )
+    calls = {"n": 0}
+
+    def flaky(body, *, api_key):  # noqa: ANN001
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return (
+                "sorry, here is an explanation without JSON",
+                {
+                    "http_status": 200,
+                    "retry_attempted": False,
+                    "generation_seconds": 0.01,
+                    "usage": {},
+                },
+            )
+        user = body["messages"][1]["content"]
+        assert "Validation error" in user
+        assert "ONLY" in user or "only" in user.lower()
+        assert "```json" not in good
+        return good, {
+            "http_status": 200,
+            "retry_attempted": False,
+            "generation_seconds": 0.02,
+            "usage": {},
+        }
+
+    monkeypatch.setattr(reasoner, "_generate_with_retry", flaky)
+    result, diag = reasoner.reason(ctx)
+    assert calls["n"] == 2
+    assert result.status == "ok"
+    assert diag.repair_attempted is True
+
+
+def test_second_invalid_response_fails_soft(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k")
+    reasoner = OpenRouterTemporalReasoner(_openrouter_cfg())
+    calls = {"n": 0}
+
+    def always_bad(*_a, **_k):  # noqa: ANN001
+        calls["n"] += 1
+        return (
+            "still not json at all",
+            {"http_status": 200, "retry_attempted": False, "generation_seconds": 0.01, "usage": {}},
+        )
+
+    monkeypatch.setattr(reasoner, "_generate_with_retry", always_bad)
+    result, diag = reasoner.reason(fixture_stable_neutral())
+    assert calls["n"] == 2
+    assert result.status == "invalid_model_output"
+    assert diag.repair_attempted is True
+    assert diag.openrouter_failure_stage == "schema_validation"
+
+
+def test_no_qwen_auto_fallback_on_invalid_output(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k")
+    reasoner = OpenRouterTemporalReasoner(_openrouter_cfg(fallback="none"))
+    monkeypatch.setattr(
+        reasoner,
+        "_generate_with_retry",
+        lambda *_a, **_k: (
+            "not json",
+            {"http_status": 200, "retry_attempted": False, "generation_seconds": 0.01, "usage": {}},
+        ),
+    )
+    result, diag = reasoner.reason(fixture_stable_neutral())
+    assert result.status == "invalid_model_output"
+    assert diag.provider == "openrouter"
+    assert resolve_temporal_reasoner_config().fallback == "none"
 
 
 def test_missing_content(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -508,8 +806,42 @@ def test_valid_evidence_ids_enforced(monkeypatch: pytest.MonkeyPatch) -> None:
         )
 
     monkeypatch.setattr(reasoner, "_generate_with_retry", invent)
-    result, _ = reasoner.reason(fixture_stable_neutral())
+    result, diag = reasoner.reason(fixture_stable_neutral())
     assert result.status == "invalid_model_output"
+    assert diag.repair_attempted is True
+    err = str((result.details or {}).get("error", "")) + str(
+        (result.details or {}).get("first_error", ""),
+    )
+    assert "unknown evidence_id" in err
+
+
+def test_deterministic_fact_override_not_accepted_in_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Model may not invent evidence; deterministic trajectory on context stays authoritative."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k")
+    reasoner = OpenRouterTemporalReasoner(_openrouter_cfg())
+    ctx = fixture_visual_pos_speech_neg()
+    traj = ctx.features.trajectory
+    evidence = build_evidence_payload(ctx, config=_openrouter_cfg())
+    eid = evidence["valid_evidence_ids"][0]
+
+    def invent_traj(*_a, **_k):  # noqa: ANN001
+        # Claims a contradictory trajectory label in free text — must not mutate ctx.
+        return (
+            _valid_reasoning_json(
+                trajectory_explanation="Deterministic trajectory is improving_positive.",
+                evidence=[{"evidence_id": eid, "explanation": "ok"}],
+                important_transitions=[],
+            ),
+            {"http_status": 200, "retry_attempted": False, "generation_seconds": 0.01, "usage": {}},
+        )
+
+    monkeypatch.setattr(reasoner, "_generate_with_retry", invent_traj)
+    result, _ = reasoner.reason(ctx)
+    assert result.status == "ok"
+    assert ctx.features.trajectory == traj
+    assert ctx.features.trajectory != "improving_positive"
 
 
 def test_prompt_injection_remains_data() -> None:
@@ -749,7 +1081,8 @@ def test_request_payload_json_serializable_real_fixture() -> None:
     raw = assert_json_serializable(body)
     parsed = json.loads(raw.decode("utf-8"))
     assert parsed["model"] == OPENROUTER_REASONER_MODEL
-    assert parsed["response_format"]["json_schema"]["strict"] is True
+    assert parsed["response_format"]["type"] == "json_object"
+    assert "json_schema" not in parsed["response_format"]
     assert parsed["provider"]["require_parameters"] is True
 
 

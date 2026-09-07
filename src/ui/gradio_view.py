@@ -278,6 +278,19 @@ def render_technical_details(routed: Any) -> str:
                 )
                 if reasoner_diag.provider:
                     lines.append(f"**Reasoner provider:** `{reasoner_diag.provider}`")
+                if reasoner_diag.provider == "openrouter":
+                    req_model = None
+                    if reasoner_diag.generation_kwargs and isinstance(
+                        reasoner_diag.generation_kwargs.get("model"),
+                        str,
+                    ):
+                        req_model = reasoner_diag.generation_kwargs.get("model")
+                    if req_model:
+                        lines.append(f"**OpenRouter request model:** `{req_model}`")
+                    if reasoner_diag.openrouter_routed_model:
+                        lines.append(
+                            f"**OpenRouter routed model:** `{reasoner_diag.openrouter_routed_model}`"
+                        )
                 if reasoning is not None and reasoner_diag.provider == "openrouter":
                     http_disp = (
                         reasoner_diag.openrouter_http_status

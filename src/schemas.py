@@ -650,6 +650,13 @@ class TemporalReasonerDiagnostics(BaseModel):
         default=None,
         description="Sanitized HTTP error body preview (no secrets).",
     )
+    openrouter_routed_model: Optional[str] = Field(
+        default=None,
+        description=(
+            "Actual model ID returned by OpenRouter when the free router "
+            "selects an underlying model. Never invented."
+        ),
+    )
 
 
 class DeterministicTemporalContext(BaseModel):

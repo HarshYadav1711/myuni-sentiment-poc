@@ -1,11 +1,19 @@
-"""Strict JSON Schema for OpenRouter structured temporal reasoning output."""
+"""JSON Schema contract for OpenRouter temporal reasoning output.
+
+Used for:
+- compact prompt field/schema description
+- local required-field checks before Pydantic validation
+
+API transport for the free-model path uses ``response_format.type = json_object``
+(not remote ``json_schema`` enforcement). Strict validation remains local.
+"""
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
-# OpenAI/OpenRouter strict json_schema requires additionalProperties:false
-# and every property listed in required.
+# Strict local contract (additionalProperties:false + required lists).
 OPENROUTER_TEMPORAL_REASONING_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
@@ -94,7 +102,13 @@ OPENROUTER_TEMPORAL_REASONING_SCHEMA: dict[str, Any] = {
     ],
 }
 
-OPENROUTER_SYSTEM_INSTRUCTION = """You are a contextual interpretation assistant for multimodal social-media VIDEO evidence.
+_COMPACT_SCHEMA = json.dumps(
+    OPENROUTER_TEMPORAL_REASONING_SCHEMA,
+    ensure_ascii=False,
+    separators=(",", ":"),
+)
+
+OPENROUTER_SYSTEM_INSTRUCTION = f"""You are a contextual interpretation assistant for multimodal social-media VIDEO evidence.
 
 Your ONLY job is to interpret EXPRESSED CONTENT over time using the structured evidence provided.
 
@@ -115,5 +129,15 @@ Hard rules:
 - Reference only supplied evidence_ids. Never invent an evidence_id.
 - Do not mention internal benchmarks, schema validation, token counts, GPU quota, or model comparison.
 - Write summary as 2–4 natural sentences suitable for a client demo.
-- Respond with a single JSON object matching the required schema.
+
+Output format (mandatory):
+- Return exactly ONE JSON object.
+- No markdown.
+- No ```json fences.
+- No explanation before or after the object.
+- The object must contain exactly the required TemporalReasoningResult fields below.
+- Do not duplicate deterministic evidence unnecessarily.
+
+Required JSON schema (compact):
+{_COMPACT_SCHEMA}
 """
