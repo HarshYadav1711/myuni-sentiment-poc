@@ -6,17 +6,26 @@ from html import escape
 from typing import Any, Optional
 
 from src.routing.input_router import CapabilityStatus, InputType
-from src.schemas import SentimentEvidence
+from src.schemas import FinalTemporalAssessment, SentimentEvidence
+from src.temporal.wellbeing import wellbeing_indicator_label
 from src.ui.display import format_confidence_pct, format_probability_pct
 
 BOTH_INPUTS_MESSAGE = "Please analyze one content item at a time."
 NO_SPEECH_MESSAGE = "No meaningful speech was detected."
 EMPTY_INPUT_MESSAGE = "Enter text or upload a supported image, audio, or video to analyze."
+CONTEXT_UNAVAILABLE_MESSAGE = "Context explanation temporarily unavailable."
 
 _LABEL_COLORS = {
     "positive": "#15803d",
     "neutral": "#475569",
     "negative": "#b91c1c",
+}
+
+_WELLBEING_COLORS = {
+    "low_concern": "#15803d",
+    "moderate_concern": "#b45309",
+    "high_concern": "#b91c1c",
+    "insufficient_evidence": "#475569",
 }
 
 
@@ -64,6 +73,70 @@ def _evidence_block(title: str, evidence: SentimentEvidence, model_name: str) ->
     """
 
 
+def _wellbeing_block(assessment: FinalTemporalAssessment) -> str:
+    indicator = assessment.overall_wellbeing_indicator
+    color = _WELLBEING_COLORS.get(indicator, "#475569")
+    label = wellbeing_indicator_label(indicator)
+    return f"""
+    <div class="mu-wellbeing">
+      <div class="mu-wellbeing-label">Overall Wellbeing Indicator</div>
+      <div class="mu-wellbeing-value" style="color:{color};">{escape(label)}</div>
+      <p class="mu-wellbeing-note">POC content-level indicator — not a clinical assessment.</p>
+    </div>
+    """
+
+
+def _highlights_block(assessment: FinalTemporalAssessment) -> str:
+    highlights = list(assessment.key_temporal_highlights or [])
+    if not highlights:
+        return (
+            '<div class="mu-sub">Key Temporal Highlights</div>'
+            '<p class="mu-copy">No temporal highlights available.</p>'
+        )
+    cards = []
+    for hl in highlights[:4]:
+        cards.append(
+            f'<div class="mu-hl-card">'
+            f'<div class="mu-hl-time">{escape(hl.timestamp_label)}</div>'
+            f'<div class="mu-hl-desc">{escape(hl.description)}</div>'
+            f"</div>"
+        )
+    return (
+        '<div class="mu-sub">Key Temporal Highlights</div>'
+        f'<div class="mu-highlights">{"".join(cards)}</div>'
+    )
+
+
+def _summary_block(assessment: FinalTemporalAssessment) -> str:
+    if assessment.status != "ok" or not (assessment.summary_explanation or "").strip():
+        return (
+            '<div class="mu-sub">Summary Explanation</div>'
+            f'<p class="mu-copy">{escape(CONTEXT_UNAVAILABLE_MESSAGE)}</p>'
+        )
+    return (
+        '<div class="mu-sub">Summary Explanation</div>'
+        f'<p class="mu-copy">{escape(assessment.summary_explanation.strip())}</p>'
+    )
+
+
+def _evidence_uncertainty_block(assessment: FinalTemporalAssessment) -> str:
+    evidence = (assessment.evidence_summary or "").strip()
+    uncertainty = (assessment.uncertainty_note or "").strip()
+    body_parts = []
+    if evidence:
+        body_parts.append(f"<p class=\"mu-copy\">{escape(evidence)}</p>")
+    if uncertainty:
+        body_parts.append(f"<p class=\"mu-note\">{escape(uncertainty)}</p>")
+    if not body_parts:
+        body_parts.append('<p class="mu-copy">No additional evidence notes.</p>')
+    return (
+        '<details class="mu-collapsible">'
+        "<summary>Evidence / Uncertainty</summary>"
+        f'{"".join(body_parts)}'
+        "</details>"
+    )
+
+
 def _shell(detected: str, body: str) -> str:
     return f"""
     <div class="mu-card">
@@ -104,7 +177,7 @@ def render_idle() -> str:
         <li>Text — Twitter-RoBERTa</li>
         <li>Image — SigLIP 2 visual sentiment</li>
         <li>Audio — Faster-Whisper transcript, then Twitter-RoBERTa</li>
-        <li>Video — sampled frames (SigLIP 2) + optional speech, late fusion</li>
+        <li>Video — sampled frames (SigLIP 2) + optional speech, temporal context</li>
       </ul>
     </div>
     """
@@ -188,11 +261,13 @@ def render_technical_details(routed: Any) -> str:
                     f"context_type=`{reasoning.context_type}` · "
                     f"confidence={reasoning.confidence:.2f}"
                 )
-                if reasoning.summary:
-                    preview = reasoning.summary[:180] + (
-                        "…" if len(reasoning.summary) > 180 else ""
-                    )
-                    lines.append(f"**Reasoning summary:** {preview}")
+            final = analysis.analysis.final_temporal_assessment
+            if final is not None:
+                lines.append(
+                    f"**Final temporal assessment:** status=`{final.status}` · "
+                    f"indicator=`{final.overall_wellbeing_indicator}` · "
+                    f"reasoner_configured=`{final.reasoner_configured}`"
+                )
             reasoner_diag = analysis.analysis.temporal_reasoner_diagnostics
             if reasoner_diag is not None:
                 lines.append(
@@ -201,6 +276,8 @@ def render_technical_details(routed: Any) -> str:
                     f"parse={reasoner_diag.parse_validation_seconds or 0:.2f}s · "
                     f"total={reasoner_diag.total_reasoner_seconds or 0:.2f}s"
                 )
+                if reasoner_diag.provider:
+                    lines.append(f"**Reasoner provider:** `{reasoner_diag.provider}`")
     if warnings:
         lines.append("**Pipeline notes:**")
         for warning in warnings[:8]:
@@ -269,6 +346,13 @@ def render_routed_result(routed: Any) -> str:
         used = list(block.fusion.contributing_modalities) if block.fusion else []
         visual_only = used == ["visual"]
         parts = [_evidence_block("Overall Sentiment", overall, routed.model_display_name or "POC fusion")]
+
+        assessment = block.final_temporal_assessment
+        if assessment is not None:
+            parts.append(_wellbeing_block(assessment))
+            parts.append(_highlights_block(assessment))
+            parts.append(_summary_block(assessment))
+            parts.append(_evidence_uncertainty_block(assessment))
 
         parts.append('<div class="mu-sub">Visual Evidence</div>')
         video = block.video

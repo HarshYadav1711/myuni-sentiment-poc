@@ -31,11 +31,13 @@ def test_runtime_info_from_pipeline_stub() -> None:
     pipeline.video_analyzer.sampling.max_ocr_frames = 8
     pipeline.video_analyzer.temporal_config.window_seconds = 5.0
     pipeline.video_analyzer.temporal_reasoner_config.model_id = "Qwen/Qwen3-1.7B"
+    pipeline.video_analyzer.temporal_reasoner_config.provider = "qwen_local_or_zerogpu"
 
     info = build_poc_runtime_info(pipeline)
     assert info.models["text"] == "text-model"
     assert info.models["asr"] == "whisper-model"
     assert info.models["temporal_reasoner"] == "Qwen/Qwen3-1.7B"
+    assert info.models["temporal_reasoner_provider"] == "qwen_local_or_zerogpu"
     assert info.video_sampling["strategy"] == "fixed_fps"
     assert info.video_sampling["temporal_window_seconds"] == 5.0
 

@@ -90,6 +90,7 @@ def test_client_video_wrap_uses_visual_and_speech(tmp_path: Path) -> None:
     bundle.deterministic_context = None
     bundle.temporal_reasoning = None
     bundle.temporal_reasoner_diagnostics = None
+    bundle.final_temporal_assessment = None
     bundle.diagnostics = VideoDiagnostics(
         frames_extracted=5,
         frames_analyzed=5,
@@ -105,7 +106,10 @@ def test_client_video_wrap_uses_visual_and_speech(tmp_path: Path) -> None:
     pipeline._video_analyzer.frame_sampler = MagicMock(name="fixed_fps")
     pipeline._video_analyzer.sampling = MagicMock(fps=1.0, max_frames=12, max_ocr_frames=8)
     pipeline._video_analyzer.temporal_config = MagicMock(window_seconds=5.0)
-    pipeline._video_analyzer.temporal_reasoner_config = MagicMock(model_id="Qwen/Qwen3-1.7B")
+    pipeline._video_analyzer.temporal_reasoner_config = MagicMock(
+        model_id="Qwen/Qwen3-1.7B",
+        provider="qwen_local_or_zerogpu",
+    )
 
     result = MyUniSentimentPipeline._client_analyze_video(
         pipeline,

@@ -82,6 +82,16 @@ CSS = """
 .mu-sub { margin-top: 1rem; font-weight: 720; color: #172554; font-size: 0.95rem; }
 .mu-quote { margin: 0.35rem 0 0.7rem; padding: 0.7rem 0.85rem; background: #f8fafc; border-left: 3px solid #6366f1; color: #1e293b; }
 .mu-helper { color: #64748b !important; font-size: 0.88rem !important; }
+.mu-wellbeing { margin-top: 0.85rem; padding: 0.85rem 0.95rem; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 12px; }
+.mu-wellbeing-label { color: #64748b; font-size: 0.78rem; font-weight: 650; text-transform: uppercase; letter-spacing: 0.04em; }
+.mu-wellbeing-value { font-size: 1.15rem; font-weight: 750; color: #172554; margin: 0.25rem 0; }
+.mu-wellbeing-note { color: #64748b; font-size: 0.82rem; margin: 0; }
+.mu-highlights { display: grid; gap: 0.55rem; margin: 0.55rem 0 0.35rem; }
+.mu-hl-card { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px; padding: 0.7rem 0.85rem; }
+.mu-hl-time { font-weight: 720; color: #1d4ed8; font-size: 0.88rem; }
+.mu-hl-desc { color: #334155; font-size: 0.92rem; margin-top: 0.2rem; }
+.mu-collapsible { margin-top: 0.85rem; }
+.mu-collapsible summary { cursor: pointer; color: #475569; font-weight: 650; font-size: 0.9rem; }
 @media (max-width: 720px) { .mu-dist { grid-template-columns: 1fr; } }
 """
 

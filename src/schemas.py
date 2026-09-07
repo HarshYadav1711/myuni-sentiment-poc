@@ -218,6 +218,13 @@ class AnalysisBlock(BaseModel):
         default=None,
         description="Non-client diagnostics for temporal reasoner execution.",
     )
+    final_temporal_assessment: Optional[FinalTemporalAssessment] = Field(
+        default=None,
+        description=(
+            "Client-facing VIDEO temporal assessment (categorical wellbeing "
+            "indicator + highlights). Not a clinical score."
+        ),
+    )
 
 
 class VideoFrameDebug(BaseModel):
@@ -455,6 +462,20 @@ ReasonerStatus = Literal[
     "invalid_model_output",
 ]
 
+WellbeingIndicator = Literal[
+    "low_concern",
+    "moderate_concern",
+    "high_concern",
+    "insufficient_evidence",
+]
+
+FinalAssessmentStatus = Literal[
+    "ok",
+    "explanation_unavailable",
+    "disabled",
+    "insufficient_evidence",
+]
+
 
 class TemporalInterpretation(BaseModel):
     """How expressed content tone evolves across the observed timeline."""
@@ -519,6 +540,46 @@ class TemporalReasoningResult(BaseModel):
     )
 
 
+class TemporalHighlight(BaseModel):
+    """One concise timeline highlight for the client-facing demo."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    start: float
+    end: float
+    timestamp_label: str
+    description: str
+    evidence_ids: list[str] = Field(default_factory=list)
+
+
+class FinalTemporalAssessment(BaseModel):
+    """Clean client-facing temporal result for VIDEO demo (Ajay/client testing).
+
+    ``overall_wellbeing_indicator`` is categorical and produced by a transparent
+    rule/gating layer over deterministic temporal context + context_type.
+    It is NOT a numerical wellbeing score and NOT a clinical assessment.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    overall_wellbeing_indicator: WellbeingIndicator = "insufficient_evidence"
+    key_temporal_highlights: list[TemporalHighlight] = Field(default_factory=list)
+    summary_explanation: str = ""
+    evidence_summary: str = ""
+    uncertainty_note: str = ""
+    context_type: ContextType = "uncertain"
+    model: Optional[str] = None
+    status: FinalAssessmentStatus = "insufficient_evidence"
+    reasoner_configured: Optional[bool] = Field(
+        default=None,
+        description="Safe configured/unconfigured flag; never exposes secret values.",
+    )
+    note: str = (
+        "POC content-level indicator — not a clinical assessment. "
+        "Analyzes expressed content evidence only; not a psychiatric diagnosis."
+    )
+
+
 class TemporalReasonerDiagnostics(BaseModel):
     """Non-client diagnostics for reasoner execution and validation."""
 
@@ -563,6 +624,16 @@ class TemporalReasonerDiagnostics(BaseModel):
             "model_load | tokenizer_load | device_placement | "
             "prompt_construction | generation | parse | unknown"
         ),
+    )
+    provider: Optional[str] = Field(
+        default=None,
+        description="openrouter | qwen_local_or_zerogpu",
+    )
+    http_status: Optional[int] = None
+    retry_attempted: bool = False
+    reasoner_configured: Optional[bool] = Field(
+        default=None,
+        description="Whether an API key / backend was configured (never the secret).",
     )
 
 

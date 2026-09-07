@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Optional
@@ -93,7 +94,25 @@ TEMPORAL_MAX_EVENTS_IN_OUTPUT = 48
 # ---------------------------------------------------------------------------
 
 TEMPORAL_REASONER_ENABLED = True
-TEMPORAL_REASONER_MODEL = "Qwen/Qwen3-1.7B"
+
+# Provider abstraction for the client-facing demo vs local/benchmark Qwen path.
+# openrouter | qwen_local_or_zerogpu
+TEMPORAL_REASONER_PROVIDER = "openrouter"
+# Optional fallback after OpenRouter failure: none | qwen
+# Default none — do not auto-consume ZeroGPU/Qwen quota on OpenRouter failure.
+TEMPORAL_REASONER_FALLBACK = "none"
+
+# OpenRouter (client-facing temporal demo). API key from env only — never hardcode.
+OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
+OPENROUTER_REASONER_MODEL = "openai/gpt-oss-20b:free"
+OPENROUTER_TIMEOUT_SECONDS = 60.0
+# At most one bounded retry for transient 429/5xx (plus the initial attempt).
+OPENROUTER_MAX_TRANSIENT_RETRIES = 1
+OPENROUTER_MAX_RETRY_AFTER_SECONDS = 5.0
+
+# Local / ZeroGPU Qwen (benchmark + optional provider). Preserved; not demo default.
+TEMPORAL_REASONER_QWEN_MODEL = "Qwen/Qwen3-1.7B"
+TEMPORAL_REASONER_MODEL = OPENROUTER_REASONER_MODEL
 # Explicit device only — never inferred from torch.cuda.is_available() (ZeroGPU).
 TEMPORAL_REASONER_DEVICE = "cpu"
 TEMPORAL_REASONER_MAX_NEW_TOKENS = 768
@@ -119,6 +138,13 @@ TEMPORAL_REASONER_EVAL_DO_SAMPLE = True
 # Candidate model IDs for Phase 3B-A comparison (4B must not be downloaded locally).
 TEMPORAL_REASONER_CANDIDATE_1_7B = "Qwen/Qwen3-1.7B"
 TEMPORAL_REASONER_CANDIDATE_4B = "Qwen/Qwen3-4B-Instruct-2507"
+
+# Wellbeing indicator gating (POC content-level rules — NOT clinically validated).
+WELLBEING_MIN_USABLE_COVERAGE = 0.25
+WELLBEING_HIGH_PERSISTENCE = 0.50
+WELLBEING_MODERATE_PERSISTENCE = 0.30
+WELLBEING_HIGH_STRONGEST_NEG = 0.70
+WELLBEING_HIGH_NEG_RUN = 2
 
 # RoBERTa max sequence length; longer transcripts are chunked (not silently truncated).
 TEXT_MAX_LENGTH = 512
@@ -175,10 +201,17 @@ class TemporalReasonerConfig:
 
     Device must be explicit. Do not select CUDA from torch.cuda.is_available()
     because Hugging Face ZeroGPU deployments have special CUDA semantics.
+
+    ``provider`` selects the backend:
+    - ``openrouter`` — HTTP Chat Completions (client demo default)
+    - ``qwen_local_or_zerogpu`` — local/HF Transformers Qwen (benchmark path)
     """
 
     enabled: bool = TEMPORAL_REASONER_ENABLED
+    provider: str = TEMPORAL_REASONER_PROVIDER
+    fallback: str = TEMPORAL_REASONER_FALLBACK
     model_id: str = TEMPORAL_REASONER_MODEL
+    qwen_model_id: str = TEMPORAL_REASONER_QWEN_MODEL
     device: str = TEMPORAL_REASONER_DEVICE
     max_new_tokens: int = TEMPORAL_REASONER_MAX_NEW_TOKENS
     temperature: float = TEMPORAL_REASONER_TEMPERATURE
@@ -193,6 +226,11 @@ class TemporalReasonerConfig:
     # Set explicitly True for evaluation sampling profiles so Transformers
     # does not ignore temperature/top_p/top_k under greedy decoding.
     do_sample: Optional[bool] = None
+    # OpenRouter settings (API key always from environment — never stored here by default).
+    openrouter_api_url: str = OPENROUTER_API_URL
+    openrouter_timeout_seconds: float = OPENROUTER_TIMEOUT_SECONDS
+    openrouter_max_transient_retries: int = OPENROUTER_MAX_TRANSIENT_RETRIES
+    openrouter_max_retry_after_seconds: float = OPENROUTER_MAX_RETRY_AFTER_SECONDS
 
     def __post_init__(self) -> None:
         if self.max_new_tokens <= 0:
@@ -213,6 +251,18 @@ class TemporalReasonerConfig:
             raise ValueError("seed must be >= 0")
         if self.do_sample is not None and not isinstance(self.do_sample, bool):
             raise ValueError("do_sample must be bool or None")
+        provider = (self.provider or "").strip().lower()
+        if provider not in {"openrouter", "qwen_local_or_zerogpu"}:
+            raise ValueError(
+                "provider must be 'openrouter' or 'qwen_local_or_zerogpu'",
+            )
+        fallback = (self.fallback or "none").strip().lower()
+        if fallback not in {"none", "qwen"}:
+            raise ValueError("fallback must be 'none' or 'qwen'")
+        if self.openrouter_timeout_seconds <= 0:
+            raise ValueError("openrouter_timeout_seconds must be > 0")
+        if self.openrouter_max_transient_retries < 0:
+            raise ValueError("openrouter_max_transient_retries must be >= 0")
 
 
 def evaluation_reasoner_config(
@@ -225,10 +275,14 @@ def evaluation_reasoner_config(
 
     Uses fixed seed for reproducibility of *seeded sampling*. This does not
     make sampling deterministic across hardware/backends — seed is recorded.
+    Forces the local Qwen provider so benchmarks never hit OpenRouter.
     """
     base = dict(
         enabled=True,
+        provider="qwen_local_or_zerogpu",
+        fallback="none",
         model_id=model_id,
+        qwen_model_id=model_id,
         device=device,
         temperature=TEMPORAL_REASONER_EVAL_TEMPERATURE,
         top_p=TEMPORAL_REASONER_EVAL_TOP_P,
@@ -241,6 +295,46 @@ def evaluation_reasoner_config(
     )
     base.update(overrides)
     return TemporalReasonerConfig(**base)
+
+
+def resolve_temporal_reasoner_config(
+    *,
+    overrides: Optional[Mapping[str, Any]] = None,
+) -> TemporalReasonerConfig:
+    """Build demo/runtime reasoner config from environment + defaults.
+
+    Environment variables (never log secret values):
+    - ``TEMPORAL_REASONER_PROVIDER`` (default openrouter)
+    - ``TEMPORAL_REASONER_FALLBACK`` (default none)
+    - ``OPENROUTER_REASONER_MODEL`` (default openai/gpt-oss-20b:free)
+    - ``OPENROUTER_API_KEY`` is read at request time, not stored on this object
+    """
+    provider = (
+        os.environ.get("TEMPORAL_REASONER_PROVIDER", TEMPORAL_REASONER_PROVIDER)
+        or TEMPORAL_REASONER_PROVIDER
+    ).strip().lower()
+    fallback = (
+        os.environ.get("TEMPORAL_REASONER_FALLBACK", TEMPORAL_REASONER_FALLBACK)
+        or TEMPORAL_REASONER_FALLBACK
+    ).strip().lower()
+    openrouter_model = (
+        os.environ.get("OPENROUTER_REASONER_MODEL", OPENROUTER_REASONER_MODEL)
+        or OPENROUTER_REASONER_MODEL
+    ).strip()
+    if provider == "qwen_local_or_zerogpu":
+        model_id = TEMPORAL_REASONER_QWEN_MODEL
+    else:
+        model_id = openrouter_model
+    kwargs: dict[str, Any] = {
+        "enabled": TEMPORAL_REASONER_ENABLED,
+        "provider": provider,
+        "fallback": fallback,
+        "model_id": model_id,
+        "qwen_model_id": TEMPORAL_REASONER_QWEN_MODEL,
+    }
+    if overrides:
+        kwargs.update(dict(overrides))
+    return TemporalReasonerConfig(**kwargs)
 
 
 @dataclass(frozen=True)

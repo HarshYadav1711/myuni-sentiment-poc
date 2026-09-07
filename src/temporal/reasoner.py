@@ -146,7 +146,7 @@ class TemporalContextReasoner:
     ) -> tuple[TemporalReasoningResult, TemporalReasonerDiagnostics]:
         """Produce validated contextual interpretation or a fail-soft status."""
         total_started = time.perf_counter()
-        diagnostics = TemporalReasonerDiagnostics()
+        diagnostics = TemporalReasonerDiagnostics(provider="qwen_local_or_zerogpu")
         if not self.config.enabled:
             diagnostics.total_reasoner_seconds = time.perf_counter() - total_started
             return (

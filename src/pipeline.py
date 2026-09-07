@@ -15,7 +15,6 @@ from src.analyzers.text import TextSentimentAnalyzer
 from src.analyzers.video import VideoAnalyzer
 from src.config import (
     DEFAULT_FUSION,
-    DEFAULT_TEMPORAL_REASONER,
     DEFAULT_TEXT_MODEL,
     DEFAULT_VIDEO_SAMPLING,
     DEFAULT_VISUAL_MODEL,
@@ -23,6 +22,7 @@ from src.config import (
     FusionConfig,
     TemporalReasonerConfig,
     VideoSamplingConfig,
+    resolve_temporal_reasoner_config,
 )
 from src.fusion import fuse_modalities
 from src.media.ffmpeg_utils import FFmpegError, FFmpegNotFoundError
@@ -65,7 +65,7 @@ class MyUniSentimentPipeline:
         video_sampling: VideoSamplingConfig = DEFAULT_VIDEO_SAMPLING,
         video_sampling_strategy: str = "fixed_fps",
         video_debug: bool = False,
-        temporal_reasoner_config: TemporalReasonerConfig = DEFAULT_TEMPORAL_REASONER,
+        temporal_reasoner_config: Optional[TemporalReasonerConfig] = None,
     ) -> None:
         self._text_analyzer = text_analyzer or TextSentimentAnalyzer()
         self._image_analyzer = image_analyzer or ImageAnalyzer(
@@ -77,6 +77,7 @@ class MyUniSentimentPipeline:
         )
         self._audio_analyzer.set_text_analyzer(self._text_analyzer)
         self._fusion_config = fusion_config
+        reasoner_cfg = temporal_reasoner_config or resolve_temporal_reasoner_config()
         self._video_analyzer = video_analyzer or VideoAnalyzer(
             image_analyzer=self._image_analyzer,
             audio_analyzer=self._audio_analyzer,
@@ -84,7 +85,7 @@ class MyUniSentimentPipeline:
             sampling=video_sampling,
             sampling_strategy=video_sampling_strategy,
             fusion_config=fusion_config,
-            temporal_reasoner_config=temporal_reasoner_config,
+            temporal_reasoner_config=reasoner_cfg,
             debug=video_debug,
         )
         self._video_analyzer.set_text_analyzer(self._text_analyzer)
@@ -418,6 +419,11 @@ class MyUniSentimentPipeline:
                     "temporal_reasoner_diagnostics",
                     None,
                 ),
+                final_temporal_assessment=getattr(
+                    bundle,
+                    "final_temporal_assessment",
+                    None,
+                ),
             ),
         )
 
@@ -670,6 +676,11 @@ class MyUniSentimentPipeline:
                 temporal_reasoner_diagnostics=getattr(
                     bundle,
                     "temporal_reasoner_diagnostics",
+                    None,
+                ),
+                final_temporal_assessment=getattr(
+                    bundle,
+                    "final_temporal_assessment",
                     None,
                 ),
             ),

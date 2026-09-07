@@ -37,12 +37,16 @@ def build_poc_runtime_info(
         "asr_language": DEFAULT_ASR_LANGUAGE,
         "fusion": "poc-fusion",
         "temporal_reasoner": DEFAULT_TEMPORAL_REASONER.model_id,
+        "temporal_reasoner_provider": DEFAULT_TEMPORAL_REASONER.provider,
     }
     if pipeline is not None:
         models["text"] = str(pipeline.text_analyzer.model_name)
         models["asr"] = str(pipeline.audio_analyzer.whisper_model_name)
         models["temporal_reasoner"] = str(
             pipeline.video_analyzer.temporal_reasoner_config.model_id,
+        )
+        models["temporal_reasoner_provider"] = str(
+            pipeline.video_analyzer.temporal_reasoner_config.provider,
         )
 
     strategy = video_sampling_strategy

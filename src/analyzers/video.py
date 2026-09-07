@@ -29,6 +29,7 @@ from src.media.ffmpeg_utils import FFmpegError, FFmpegNotFoundError, probe_video
 from src.media.samplers import FrameSampler, SceneSamplingConfig, build_frame_sampler
 from src.schemas import (
     DeterministicTemporalContext,
+    FinalTemporalAssessment,
     SentimentEvidence,
     SpeechAnalysisResult,
     TemporalContext,
@@ -38,7 +39,11 @@ from src.schemas import (
     VideoFrameDebug,
 )
 from src.temporal.builder import TemporalContextBuilder
-from src.temporal.reasoner import TemporalContextReasoner
+from src.temporal.final_assessment import build_final_temporal_assessment
+from src.temporal.prompt import build_evidence_payload, collect_valid_evidence_ids
+from src.temporal.providers import create_temporal_reasoner
+from src.temporal.providers.base import TemporalReasonerProvider
+from src.temporal.providers.openrouter import openrouter_api_key_configured
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +79,7 @@ class VideoAnalysisBundle:
     deterministic_context: Optional[DeterministicTemporalContext] = None
     temporal_reasoning: Optional[TemporalReasoningResult] = None
     temporal_reasoner_diagnostics: Optional[TemporalReasonerDiagnostics] = None
+    final_temporal_assessment: Optional[FinalTemporalAssessment] = None
 
 
 def _ocr_frame_indices(n_frames: int, max_ocr: int) -> set[int]:
@@ -111,7 +117,7 @@ class VideoAnalyzer:
         fusion_config: FusionConfig = DEFAULT_FUSION,
         temporal_config: TemporalConfig = DEFAULT_TEMPORAL,
         temporal_reasoner_config: TemporalReasonerConfig = DEFAULT_TEMPORAL_REASONER,
-        temporal_reasoner: Optional[TemporalContextReasoner] = None,
+        temporal_reasoner: Optional[TemporalReasonerProvider] = None,
         ffmpeg_path: Optional[str] = None,
         ffprobe_path: Optional[str] = None,
         debug: bool = False,
@@ -128,7 +134,7 @@ class VideoAnalyzer:
         self.fusion_config = fusion_config
         self.temporal_config = temporal_config
         self.temporal_reasoner_config = temporal_reasoner_config
-        # Lazy: do not load Qwen at construction; reasoner object may be shared.
+        # Lazy: do not load reasoner at construction; object may be shared/injected.
         self._temporal_reasoner = temporal_reasoner
         self.ffmpeg_path = ffmpeg_path
         self.ffprobe_path = ffprobe_path
@@ -141,12 +147,12 @@ class VideoAnalyzer:
         )
 
     @property
-    def temporal_reasoner(self) -> Optional[TemporalContextReasoner]:
+    def temporal_reasoner(self) -> Optional[TemporalReasonerProvider]:
         return self._temporal_reasoner
 
-    def _get_temporal_reasoner(self) -> TemporalContextReasoner:
+    def _get_temporal_reasoner(self) -> TemporalReasonerProvider:
         if self._temporal_reasoner is None:
-            self._temporal_reasoner = TemporalContextReasoner(self.temporal_reasoner_config)
+            self._temporal_reasoner = create_temporal_reasoner(self.temporal_reasoner_config)
         return self._temporal_reasoner
 
     @property
@@ -424,6 +430,10 @@ class VideoAnalyzer:
                 if temporal_context is not None
                 else None
             )
+            final_assessment = self._build_final_temporal_assessment(
+                temporal_context=temporal_context,
+                temporal_reasoning=temporal_reasoning,
+            )
 
             logger.info(
                 "Video analysis complete path=%s strategy=%s frames=%s/%s overall=%s",
@@ -453,6 +463,7 @@ class VideoAnalyzer:
                     "_last_temporal_reasoner_diagnostics",
                     None,
                 ),
+                final_temporal_assessment=final_assessment,
             )
         finally:
             if tmp_root is not None:
@@ -551,6 +562,46 @@ class VideoAnalyzer:
                 model=self.temporal_reasoner_config.model_id,
                 status="reasoner_unavailable",
                 details={"error": str(exc)},
+            )
+
+    def _build_final_temporal_assessment(
+        self,
+        *,
+        temporal_context: Optional[TemporalContext],
+        temporal_reasoning: Optional[TemporalReasoningResult],
+    ) -> Optional[FinalTemporalAssessment]:
+        """Compose client-facing assessment; never raises into the video path."""
+        if temporal_context is None:
+            return None
+        try:
+            evidence = build_evidence_payload(
+                temporal_context,
+                config=self.temporal_reasoner_config,
+            )
+            valid_ids = set(collect_valid_evidence_ids(evidence))
+            provider = (self.temporal_reasoner_config.provider or "").strip().lower()
+            configured: Optional[bool]
+            if provider == "openrouter":
+                configured = openrouter_api_key_configured()
+            else:
+                configured = True
+            return build_final_temporal_assessment(
+                temporal_context,
+                temporal_reasoning,
+                valid_evidence_ids=valid_ids,
+                reasoner_configured=configured,
+                model_id=self.temporal_reasoner_config.model_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Final temporal assessment build failed: %s", exc)
+            return FinalTemporalAssessment(
+                overall_wellbeing_indicator="insufficient_evidence",
+                summary_explanation="",
+                evidence_summary="",
+                uncertainty_note="Context explanation temporarily unavailable.",
+                context_type="uncertain",
+                model=self.temporal_reasoner_config.model_id,
+                status="explanation_unavailable",
             )
 
     def _aggregate_ocr(
