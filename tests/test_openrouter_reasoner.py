@@ -45,6 +45,7 @@ from src.temporal.providers import create_temporal_reasoner
 from src.temporal.providers.openrouter import (
     OpenRouterError,
     OpenRouterTemporalReasoner,
+    build_openrouter_model_chain,
     build_openrouter_request_body,
     extract_message_content,
     openrouter_api_key_configured,
@@ -152,23 +153,43 @@ def _fake_http_response(payload: dict, *, status: int = 200) -> SimpleNamespace:
 # ---------------------------------------------------------------------------
 
 
+EXPECTED_OPENROUTER_MODEL_CHAIN = [
+    "minimax/minimax-m3:free",
+    "liquid/lfm-2.5-2.6b:free",
+    "minimax/minimax-m2.7:free",
+]
+
+
 def test_openrouter_model_id_default() -> None:
-    assert OPENROUTER_REASONER_MODEL == "nex-agi/nex-n2-pro:free"
-    assert OPENROUTER_REASONER_FALLBACK_MODELS == "minimax/minimax-m3:free"
+    assert OPENROUTER_REASONER_MODEL == "minimax/minimax-m3:free"
+    assert OPENROUTER_REASONER_FALLBACK_MODELS == (
+        "liquid/lfm-2.5-2.6b:free,minimax/minimax-m2.7:free"
+    )
     cfg = resolve_temporal_reasoner_config()
     assert cfg.provider == "openrouter"
-    assert cfg.model_id == "nex-agi/nex-n2-pro:free"
-    assert cfg.openrouter_fallback_models == ["minimax/minimax-m3:free"]
+    assert cfg.model_id == "minimax/minimax-m3:free"
+    assert cfg.openrouter_fallback_models == [
+        "liquid/lfm-2.5-2.6b:free",
+        "minimax/minimax-m2.7:free",
+    ]
     assert cfg.fallback == "none"
     assert "gpt-oss" not in cfg.model_id
     assert cfg.model_id != "openrouter/free"
-    for mid in [cfg.model_id, *cfg.openrouter_fallback_models]:
-        assert ":free" in mid
+    chain = build_openrouter_model_chain(
+        primary=cfg.model_id,
+        fallback_models=cfg.openrouter_fallback_models,
+    )
+    assert chain == EXPECTED_OPENROUTER_MODEL_CHAIN
+    for mid in chain:
+        assert mid.endswith(":free")
         assert "gpt-oss" not in mid
         assert "gemma" not in mid.lower()
+        assert "nex-agi" not in mid.lower()
         assert "dots-studio" not in mid.lower()
     assert "gemma" not in OPENROUTER_REASONER_MODEL.lower()
     assert "gemma" not in OPENROUTER_REASONER_FALLBACK_MODELS.lower()
+    assert "nex-agi" not in OPENROUTER_REASONER_MODEL.lower()
+    assert "nex-agi" not in OPENROUTER_REASONER_FALLBACK_MODELS.lower()
 
 
 def test_openrouter_model_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -180,18 +201,34 @@ def test_openrouter_model_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
     cfg = resolve_temporal_reasoner_config()
     assert cfg.model_id == "some-other/free-model"
     assert cfg.model_id != "openai/gpt-oss-20b"
-    assert cfg.model_id != "nex-agi/nex-n2-pro:free"
+    assert cfg.model_id != "minimax/minimax-m3:free"
     assert cfg.openrouter_fallback_models == ["alt/free-a", "alt/free-b"]
+    assert build_openrouter_model_chain(
+        primary=cfg.model_id,
+        fallback_models=cfg.openrouter_fallback_models,
+    ) == ["some-other/free-model", "alt/free-a", "alt/free-b"]
 
 
 def test_parse_openrouter_fallback_models() -> None:
     assert parse_openrouter_fallback_models("") == []
     assert parse_openrouter_fallback_models(
-        "minimax/minimax-m3:free, other/free",
-    ) == ["minimax/minimax-m3:free", "other/free"]
+        "liquid/lfm-2.5-2.6b:free, other/free",
+    ) == ["liquid/lfm-2.5-2.6b:free", "other/free"]
     assert parse_openrouter_fallback_models(
         "a:free, a:free, b:free",
     ) == ["a:free", "b:free"]
+
+
+def test_openrouter_model_chain_deduplicates() -> None:
+    assert build_openrouter_model_chain(
+        primary="minimax/minimax-m3:free",
+        fallback_models=[
+            "minimax/minimax-m3:free",
+            "liquid/lfm-2.5-2.6b:free",
+            "liquid/lfm-2.5-2.6b:free",
+            "minimax/minimax-m2.7:free",
+        ],
+    ) == EXPECTED_OPENROUTER_MODEL_CHAIN
 
 
 def test_openrouter_request_shape_and_auth_header(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -221,10 +258,13 @@ def test_openrouter_request_shape_and_auth_header(monkeypatch: pytest.MonkeyPatc
         system=OPENROUTER_SYSTEM_INSTRUCTION,
         user="hello",
         max_tokens=768,
-        fallback_models=["minimax/minimax-m3:free"],
+        fallback_models=[
+            "liquid/lfm-2.5-2.6b:free",
+            "minimax/minimax-m2.7:free",
+        ],
     )
-    assert body["model"] == "nex-agi/nex-n2-pro:free"
-    assert body["models"] == ["minimax/minimax-m3:free"]
+    assert "model" not in body
+    assert body["models"] == EXPECTED_OPENROUTER_MODEL_CHAIN
     assert body["response_format"]["type"] == "json_object"
     assert "json_schema" not in body["response_format"]
     assert body["provider"]["require_parameters"] is True
@@ -254,8 +294,8 @@ def test_openrouter_request_shape_and_auth_header(monkeypatch: pytest.MonkeyPatc
     assert captured["url"] == OPENROUTER_API_URL
     assert captured["headers"]["authorization"] == "Bearer test-secret-key-do-not-log"
     assert captured["headers"]["content-type"] == "application/json"
-    assert captured["body"]["model"] == "nex-agi/nex-n2-pro:free"
-    assert captured["body"]["models"] == ["minimax/minimax-m3:free"]
+    assert "model" not in captured["body"]
+    assert captured["body"]["models"] == EXPECTED_OPENROUTER_MODEL_CHAIN
     assert captured["body"]["response_format"]["type"] == "json_object"
     assert "json_schema" not in captured["body"]["response_format"]
     assert captured["body"]["provider"]["require_parameters"] is True
@@ -298,7 +338,8 @@ def test_successful_structured_result(monkeypatch: pytest.MonkeyPatch) -> None:
     valid = set(payload["valid_evidence_ids"])
 
     def fake_gen(body, *, api_key):  # noqa: ANN001
-        assert body["model"] == OPENROUTER_REASONER_MODEL
+        assert "model" not in body
+        assert body["models"][0] == OPENROUTER_REASONER_MODEL
         assert body["response_format"]["type"] == "json_object"
         assert "json_schema" not in body["response_format"]
         return _valid_reasoning_json(evidence_ids_ok=True), {
@@ -349,13 +390,12 @@ def test_routed_model_recorded_when_returned(monkeypatch: pytest.MonkeyPatch) ->
     )
 
     def fake_post(body, *, api_key, api_url, timeout_seconds):  # noqa: ANN001
-        assert body["model"] == "nex-agi/nex-n2-pro:free"
-        assert body["models"] == ["minimax/minimax-m3:free"]
-        assert "gpt-oss-20b" not in body["model"]
+        assert "model" not in body
+        assert body["models"] == EXPECTED_OPENROUTER_MODEL_CHAIN
         assert body["response_format"]["type"] == "json_object"
         return {
             "id": "gen-1",
-            "model": "nex-agi/nex-n2-pro",
+            "model": "minimax/minimax-m3:free",
             "choices": [{"message": {"content": raw}}],
             "usage": {"prompt_tokens": 1, "completion_tokens": 2},
         }
@@ -366,16 +406,20 @@ def test_routed_model_recorded_when_returned(monkeypatch: pytest.MonkeyPatch) ->
     )
     result, diag = reasoner.reason(ctx)
     assert result.status == "ok"
-    assert diag.openrouter_routed_model == "nex-agi/nex-n2-pro"
-    assert result.model == "nex-agi/nex-n2-pro"
+    assert diag.openrouter_routed_model == "minimax/minimax-m3:free"
+    assert result.model == "minimax/minimax-m3:free"
     assert result.model != "openai/gpt-oss-20b"
     assert result.model != "openai/gpt-oss-20b:free"
     assert (diag.generation_kwargs or {}).get("requested_model") == (
-        "nex-agi/nex-n2-pro:free"
+        "minimax/minimax-m3:free"
     )
     assert (diag.generation_kwargs or {}).get("fallback_models") == [
-        "minimax/minimax-m3:free",
+        "liquid/lfm-2.5-2.6b:free",
+        "minimax/minimax-m2.7:free",
     ]
+    assert (diag.generation_kwargs or {}).get("model_chain") == (
+        EXPECTED_OPENROUTER_MODEL_CHAIN
+    )
 
 
 def test_fallback_model_can_satisfy_successful_response(
@@ -393,11 +437,11 @@ def test_fallback_model_can_satisfy_successful_response(
     )
 
     def fake_post(body, *, api_key, api_url, timeout_seconds):  # noqa: ANN001
-        assert body["model"] == "nex-agi/nex-n2-pro:free"
-        assert body["models"] == ["minimax/minimax-m3:free"]
+        assert "model" not in body
+        assert body["models"] == EXPECTED_OPENROUTER_MODEL_CHAIN
         return {
             "id": "gen-fb",
-            "model": "minimax/minimax-m3:free",
+            "model": "liquid/lfm-2.5-2.6b:free",
             "choices": [{"message": {"content": raw}}],
             "usage": {"prompt_tokens": 2, "completion_tokens": 3},
         }
@@ -408,11 +452,14 @@ def test_fallback_model_can_satisfy_successful_response(
     )
     result, diag = reasoner.reason(ctx)
     assert result.status == "ok"
-    assert diag.openrouter_routed_model == "minimax/minimax-m3:free"
-    assert result.model == "minimax/minimax-m3:free"
-    assert result.model != "nex-agi/nex-n2-pro:free"
+    assert diag.openrouter_routed_model == "liquid/lfm-2.5-2.6b:free"
+    assert result.model == "liquid/lfm-2.5-2.6b:free"
+    assert result.model != "minimax/minimax-m3:free"
     assert (diag.generation_kwargs or {}).get("requested_model") == (
-        "nex-agi/nex-n2-pro:free"
+        "minimax/minimax-m3:free"
+    )
+    assert (diag.generation_kwargs or {}).get("model_chain") == (
+        EXPECTED_OPENROUTER_MODEL_CHAIN
     )
 
 
@@ -486,12 +533,15 @@ def test_404_model_unavailable_fail_soft(monkeypatch: pytest.MonkeyPatch) -> Non
 
 def test_no_paid_gpt_oss_fallback_in_defaults() -> None:
     cfg = resolve_temporal_reasoner_config()
-    assert cfg.model_id == "nex-agi/nex-n2-pro:free"
+    assert cfg.model_id == "minimax/minimax-m3:free"
     assert cfg.fallback == "none"
     assert cfg.model_id != "openai/gpt-oss-20b"
     assert "gpt-oss-20b" not in cfg.model_id
     assert cfg.model_id != "openrouter/free"
-    assert cfg.openrouter_fallback_models == ["minimax/minimax-m3:free"]
+    assert cfg.openrouter_fallback_models == [
+        "liquid/lfm-2.5-2.6b:free",
+        "minimax/minimax-m2.7:free",
+    ]
     body = build_openrouter_request_body(
         model_id=cfg.model_id,
         system=OPENROUTER_SYSTEM_INSTRUCTION,
@@ -499,14 +549,16 @@ def test_no_paid_gpt_oss_fallback_in_defaults() -> None:
         max_tokens=16,
         fallback_models=cfg.openrouter_fallback_models,
     )
-    assert body["model"] == "nex-agi/nex-n2-pro:free"
-    assert body["models"] == ["minimax/minimax-m3:free"]
+    assert "model" not in body
+    assert body["models"] == EXPECTED_OPENROUTER_MODEL_CHAIN
     assert body["response_format"]["type"] == "json_object"
     assert "json_schema" not in body["response_format"]
     assert body["provider"]["require_parameters"] is True
     joined = json.dumps(body)
     assert "gpt-oss" not in joined
     assert "openrouter/free" not in joined
+    assert "nex-agi" not in joined
+    assert "gemma" not in joined
 
 
 def test_missing_key_fail_soft(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1294,12 +1346,15 @@ def test_request_payload_json_serializable_real_fixture() -> None:
         system=OPENROUTER_SYSTEM_INSTRUCTION,
         user=user,
         max_tokens=768,
-        fallback_models=["minimax/minimax-m3:free"],
+        fallback_models=[
+            "liquid/lfm-2.5-2.6b:free",
+            "minimax/minimax-m2.7:free",
+        ],
     )
     raw = assert_json_serializable(body)
     parsed = json.loads(raw.decode("utf-8"))
-    assert parsed["model"] == OPENROUTER_REASONER_MODEL
-    assert parsed["models"] == ["minimax/minimax-m3:free"]
+    assert "model" not in parsed
+    assert parsed["models"] == EXPECTED_OPENROUTER_MODEL_CHAIN
     assert parsed["response_format"]["type"] == "json_object"
     assert "json_schema" not in parsed["response_format"]
     assert parsed["provider"]["require_parameters"] is True

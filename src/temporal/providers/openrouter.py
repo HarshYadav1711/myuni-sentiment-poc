@@ -167,6 +167,26 @@ def normalize_openrouter_fallback_models(
     return out
 
 
+def build_openrouter_model_chain(
+    *,
+    primary: str,
+    fallback_models: Optional[Sequence[str]] = None,
+) -> list[str]:
+    """Ordered free-model chain for raw OpenRouter REST ``models`` field.
+
+    Deduplicates while preserving priority: primary first, then fallbacks.
+    """
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for model in [primary, *(fallback_models or [])]:
+        cleaned = str(model or "").strip()
+        if not cleaned or cleaned in seen:
+            continue
+        ordered.append(cleaned)
+        seen.add(cleaned)
+    return ordered
+
+
 def build_openrouter_request_body(
     *,
     model_id: str,
@@ -180,11 +200,18 @@ def build_openrouter_request_body(
     Free-model path uses ``json_object`` (not remote json_schema). Strict
     TemporalReasoningResult validation remains local after the response.
 
-    OpenRouter native ``models`` lists free-model fallbacks tried when the
-    primary is rate-limited or unavailable (no client-side model fan-out).
+    Raw urllib client sends OpenRouter's documented ordered ``models`` array
+    only — no separate top-level ``model`` field — so fallbacks are tried when
+    an earlier free model is unavailable / rate-limited.
     """
-    body: dict[str, Any] = {
-        "model": model_id,
+    ordered_models = build_openrouter_model_chain(
+        primary=model_id,
+        fallback_models=fallback_models,
+    )
+    if not ordered_models:
+        raise ValueError("OpenRouter model chain is empty")
+    return {
+        "models": ordered_models,
         "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": user},
@@ -198,10 +225,6 @@ def build_openrouter_request_body(
             "require_parameters": True,
         },
     }
-    models = normalize_openrouter_fallback_models(fallback_models, primary=model_id)
-    if models:
-        body["models"] = models
-    return body
 
 
 def _parse_retry_after(headers: Any, *, max_wait: float) -> Optional[float]:
@@ -657,14 +680,16 @@ class OpenRouterTemporalReasoner:
         ]
 
         # Safe meta only — never store Authorization or API key.
-        fallback_models = normalize_openrouter_fallback_models(
-            self.config.openrouter_fallback_models,
+        model_chain = build_openrouter_model_chain(
             primary=self.config.model_id,
+            fallback_models=self.config.openrouter_fallback_models,
         )
+        fallback_models = model_chain[1:]
         diagnostics.generation_kwargs = {
             "model": self.config.model_id,
-            "requested_model": self.config.model_id,
+            "requested_model": model_chain[0] if model_chain else self.config.model_id,
             "fallback_models": fallback_models,
+            "model_chain": model_chain,
             "api_url": self.config.openrouter_api_url,
             "response_format_type": "json_object",
             "provider_require_parameters": True,

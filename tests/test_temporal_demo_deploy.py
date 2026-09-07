@@ -127,12 +127,17 @@ def test_openrouter_defaults_in_bundle(deploy_ready: Path) -> None:
     cfg = (deploy_ready / "src" / "config.py").read_text(encoding="utf-8")
     assert 'TEMPORAL_REASONER_PROVIDER = "openrouter"' in cfg
     assert 'TEMPORAL_REASONER_FALLBACK = "none"' in cfg
-    assert 'OPENROUTER_REASONER_MODEL = "nex-agi/nex-n2-pro:free"' in cfg
+    assert 'OPENROUTER_REASONER_MODEL = "minimax/minimax-m3:free"' in cfg
     assert (
-        'OPENROUTER_REASONER_FALLBACK_MODELS = "minimax/minimax-m3:free"'
-        in cfg
-    )
+        'OPENROUTER_REASONER_FALLBACK_MODELS = (\n'
+        '    "liquid/lfm-2.5-2.6b:free,minimax/minimax-m2.7:free"\n'
+        ')'
+    ) in cfg or (
+        'OPENROUTER_REASONER_FALLBACK_MODELS = '
+        '"liquid/lfm-2.5-2.6b:free,minimax/minimax-m2.7:free"'
+    ) in cfg
     assert "gemma" not in cfg.lower()
+    assert "nex-agi" not in cfg.lower()
     assert "openai/gpt-oss-20b:free" not in cfg
     assert 'OPENROUTER_REASONER_MODEL = "openrouter/free"' not in cfg
     assert 'TEMPORAL_REASONER_FALLBACK = "none"' in cfg
@@ -188,14 +193,14 @@ def test_qwen_not_default_provider(deploy_ready: Path) -> None:
         ")\n"
         "assert TEMPORAL_REASONER_PROVIDER == 'openrouter'\n"
         "assert TEMPORAL_REASONER_FALLBACK == 'none'\n"
-        "assert OPENROUTER_REASONER_MODEL == 'nex-agi/nex-n2-pro:free'\n"
-        "assert OPENROUTER_REASONER_FALLBACK_MODELS == "
-        "'minimax/minimax-m3:free'\n"
+        "assert OPENROUTER_REASONER_MODEL == 'minimax/minimax-m3:free'\n"
+        "assert OPENROUTER_REASONER_FALLBACK_MODELS.replace(' ', '') == "
+        "'liquid/lfm-2.5-2.6b:free,minimax/minimax-m2.7:free'\n"
         "cfg = resolve_temporal_reasoner_config()\n"
         "assert cfg.provider == 'openrouter'\n"
         "assert cfg.fallback == 'none'\n"
         "assert cfg.openrouter_fallback_models == "
-        "['minimax/minimax-m3:free']\n"
+        "['liquid/lfm-2.5-2.6b:free', 'minimax/minimax-m2.7:free']\n"
         "print('ok')\n"
     )
     proc = subprocess.run(

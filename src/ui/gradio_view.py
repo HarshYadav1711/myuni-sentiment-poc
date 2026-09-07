@@ -309,12 +309,22 @@ def render_technical_details(routed: Any) -> str:
                 if reasoner_diag.provider == "openrouter":
                     req_model = None
                     fallback_models = None
+                    model_chain = None
                     if reasoner_diag.generation_kwargs:
+                        raw_chain = reasoner_diag.generation_kwargs.get("model_chain")
+                        if isinstance(raw_chain, list) and raw_chain:
+                            model_chain = [
+                                str(item).strip()
+                                for item in raw_chain
+                                if str(item).strip()
+                            ]
                         raw_req = reasoner_diag.generation_kwargs.get("requested_model")
                         if not isinstance(raw_req, str):
                             raw_req = reasoner_diag.generation_kwargs.get("model")
                         if isinstance(raw_req, str) and raw_req.strip():
                             req_model = raw_req.strip()
+                        elif model_chain:
+                            req_model = model_chain[0]
                         raw_fb = reasoner_diag.generation_kwargs.get("fallback_models")
                         if isinstance(raw_fb, list) and raw_fb:
                             fallback_models = [
@@ -322,12 +332,20 @@ def render_technical_details(routed: Any) -> str:
                                 for item in raw_fb
                                 if str(item).strip()
                             ]
+                        elif model_chain and len(model_chain) > 1:
+                            fallback_models = model_chain[1:]
                     if req_model:
-                        lines.append(f"**OpenRouter request model:** `{req_model}`")
+                        lines.append(f"**OpenRouter requested model:** `{req_model}`")
                     if fallback_models:
                         lines.append(
                             "**OpenRouter fallback models:** `"
                             + "`, `".join(fallback_models)
+                            + "`"
+                        )
+                    if model_chain:
+                        lines.append(
+                            "**OpenRouter model chain:** `"
+                            + "` → `".join(model_chain)
                             + "`"
                         )
                     if reasoner_diag.openrouter_routed_model:
