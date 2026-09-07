@@ -79,9 +79,8 @@ def _wellbeing_block(assessment: FinalTemporalAssessment) -> str:
     label = wellbeing_indicator_label(indicator)
     return f"""
     <div class="mu-wellbeing">
-      <div class="mu-wellbeing-label">Overall Wellbeing Indicator</div>
+      <div class="mu-wellbeing-label">Overall Well-Being Score</div>
       <div class="mu-wellbeing-value" style="color:{color};">{escape(label)}</div>
-      <p class="mu-wellbeing-note">POC content-level indicator — not a clinical assessment.</p>
     </div>
     """
 
@@ -94,7 +93,7 @@ def _highlights_block(assessment: FinalTemporalAssessment) -> str:
             '<p class="mu-copy">No temporal highlights available.</p>'
         )
     cards = []
-    for hl in highlights[:4]:
+    for hl in highlights[:5]:
         cards.append(
             f'<div class="mu-hl-card">'
             f'<div class="mu-hl-time">{escape(hl.timestamp_label)}</div>'
@@ -119,21 +118,11 @@ def _summary_block(assessment: FinalTemporalAssessment) -> str:
     )
 
 
-def _evidence_uncertainty_block(assessment: FinalTemporalAssessment) -> str:
-    evidence = (assessment.evidence_summary or "").strip()
-    uncertainty = (assessment.uncertainty_note or "").strip()
-    body_parts = []
-    if evidence:
-        body_parts.append(f"<p class=\"mu-copy\">{escape(evidence)}</p>")
-    if uncertainty:
-        body_parts.append(f"<p class=\"mu-note\">{escape(uncertainty)}</p>")
-    if not body_parts:
-        body_parts.append('<p class="mu-copy">No additional evidence notes.</p>')
+def _poc_note() -> str:
     return (
-        '<details class="mu-collapsible">'
-        "<summary>Evidence / Uncertainty</summary>"
-        f'{"".join(body_parts)}'
-        "</details>"
+        '<p class="mu-wellbeing-note">'
+        "POC content-level wellbeing indicator — not a clinical assessment."
+        "</p>"
     )
 
 
@@ -244,6 +233,40 @@ def render_technical_details(routed: Any) -> str:
                 "**Video path:** FFmpeg frame sampling (CPU) · SigLIP 2 (ZeroGPU) · "
                 "Faster-Whisper CPU int8 → Twitter-RoBERTa. Fusion is a POC baseline only."
             )
+            overall = analysis.analysis.overall
+            if overall is not None:
+                lines.append(
+                    f"**Overall sentiment (fusion POC):** `{overall.label}` · "
+                    f"confidence={overall.confidence:.2f}"
+                )
+                if overall.probabilities:
+                    lines.append(
+                        "**RoBERTa/fusion class probs:** "
+                        f"pos={float(overall.probabilities.get('positive', 0)):.3f} · "
+                        f"neu={float(overall.probabilities.get('neutral', 0)):.3f} · "
+                        f"neg={float(overall.probabilities.get('negative', 0)):.3f}"
+                    )
+            modalities = analysis.analysis.modalities
+            if modalities.visual is not None:
+                lines.append(
+                    f"**Visual evidence:** `{modalities.visual.label}` "
+                    f"(SigLIP 2)"
+                )
+            if modalities.speech is not None:
+                lines.append(
+                    f"**Speech evidence:** `{modalities.speech.label}` "
+                    f"(Whisper → Twitter-RoBERTa)"
+                )
+            elif analysis.analysis.transcript:
+                lines.append("**Speech:** transcript present; see pipeline notes if unused.")
+            else:
+                lines.append("**Speech:** no meaningful speech detected.")
+            fusion = analysis.analysis.fusion
+            if fusion is not None:
+                used = ", ".join(fusion.contributing_modalities) or "none"
+                lines.append(f"**Fusion modalities used:** {used}")
+                if fusion.explanation:
+                    lines.append(f"**Fusion note:** {fusion.explanation}")
             temporal = analysis.analysis.temporal_context
             if temporal is not None:
                 feats = temporal.features
@@ -266,8 +289,13 @@ def render_technical_details(routed: Any) -> str:
                 lines.append(
                     f"**Final temporal assessment:** status=`{final.status}` · "
                     f"indicator=`{final.overall_wellbeing_indicator}` · "
+                    f"client_label=`{wellbeing_indicator_label(final.overall_wellbeing_indicator)}` · "
                     f"reasoner_configured=`{final.reasoner_configured}`"
                 )
+                if final.evidence_summary:
+                    lines.append(f"**Evidence summary:** {final.evidence_summary}")
+                if final.uncertainty_note:
+                    lines.append(f"**Uncertainty:** {final.uncertainty_note}")
             reasoner_diag = analysis.analysis.temporal_reasoner_diagnostics
             if reasoner_diag is not None:
                 lines.append(
@@ -387,61 +415,18 @@ def render_routed_result(routed: Any) -> str:
         return _shell("AUDIO", body)
 
     if kind == "VIDEO":
-        overall = block.overall
-        used = list(block.fusion.contributing_modalities) if block.fusion else []
-        visual_only = used == ["visual"]
-        parts = [_evidence_block("Overall Sentiment", overall, routed.model_display_name or "POC fusion")]
-
+        parts: list[str] = []
         assessment = block.final_temporal_assessment
         if assessment is not None:
             parts.append(_wellbeing_block(assessment))
             parts.append(_highlights_block(assessment))
             parts.append(_summary_block(assessment))
-            parts.append(_evidence_uncertainty_block(assessment))
-
-        parts.append('<div class="mu-sub">Visual Evidence</div>')
-        video = block.video
-        strategy = video.sampling_strategy if video else "fixed_fps"
-        analyzed = video.frames_analyzed if video else 0
-        extracted = video.frames_extracted if video else 0
-        parts.append(
-            f'<p class="mu-copy">Strategy: <strong>{escape(str(strategy))}</strong> · '
-            f"Frames sampled/analyzed: <strong>{extracted}/{analyzed}</strong></p>"
-        )
-        if modalities.visual is not None:
-            parts.append(
-                f'<div class="mu-inline">Visual sentiment {_pill(modalities.visual.label)}</div>'
-            )
-            parts.append(_dist_html(modalities.visual.probabilities))
+            parts.append(_poc_note())
         else:
-            parts.append('<p class="mu-copy">No usable visual evidence.</p>')
-
-        parts.append('<div class="mu-sub">Speech Evidence</div>')
-        if block.transcript:
             parts.append(
-                f'<blockquote class="mu-quote">{escape(block.transcript)}</blockquote>'
+                '<p class="mu-copy">Temporal wellbeing assessment unavailable.</p>'
             )
-        if modalities.speech is not None:
-            parts.append(
-                f'<div class="mu-inline">Speech sentiment {_pill(modalities.speech.label)}</div>'
-            )
-            parts.append(_dist_html(modalities.speech.probabilities))
-        else:
-            parts.append(f'<p class="mu-copy">{escape(NO_SPEECH_MESSAGE)}</p>')
-            parts.append('<p class="mu-note">Speech was not treated as a neutral sentiment score.</p>')
-
-        parts.append('<div class="mu-sub">Fusion</div>')
-        used_label = ", ".join(used) if used else "none"
-        parts.append(
-            f'<p class="mu-copy">Available modalities used: <strong>{escape(used_label)}</strong></p>'
-        )
-        if visual_only:
-            parts.append(
-                '<p class="mu-note">Overall sentiment used visual evidence only. '
-                "It is not a speech/neutral default.</p>"
-            )
-        if block.fusion and block.fusion.explanation:
-            parts.append(f'<p class="mu-copy">{escape(block.fusion.explanation)}</p>')
+            parts.append(_poc_note())
         return _shell("VIDEO", "".join(parts))
 
     evidence = modalities.text or modalities.visual or modalities.speech or block.overall

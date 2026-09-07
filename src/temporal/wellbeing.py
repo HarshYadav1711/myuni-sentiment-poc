@@ -49,25 +49,25 @@ The LLM may explain the indicator but must not invent it.
 No 0–10 or 0–100 numerical score is used — there is no calibrated formula.
 """.strip()
 
+# Client-facing display labels (internal enum unchanged).
+WELLBEING_CLIENT_LABELS: dict[str, str] = {
+    "low_concern": "Low Stress",
+    "moderate_concern": "Moderate Stress",
+    "high_concern": "High Stress",
+    "insufficient_evidence": "Insufficient Evidence",
+}
 
-def compute_wellbeing_indicator(
-    temporal: TemporalContext,
-    *,
-    context_type: ContextType | str = "uncertain",
-) -> WellbeingIndicator:
-    """Return a conservative categorical indicator from deterministic facts + context."""
+
+def _coverage_insufficient(temporal: TemporalContext) -> bool:
     feats = temporal.features
     coverage = float(feats.evidence_coverage.overall_usable_coverage or 0.0)
     usable = [w for w in temporal.windows if w.usable]
-    if coverage < WELLBEING_MIN_USABLE_COVERAGE or not usable:
-        return "insufficient_evidence"
+    return coverage < WELLBEING_MIN_USABLE_COVERAGE or not usable
 
-    ctx = str(context_type or "uncertain").strip().lower()
-    if ctx != "personal_expression":
-        # Conservative POC: only personal_expression may leave insufficient_evidence.
-        # humor_or_sarcasm / quoted / informational / etc. → insufficient_evidence.
-        return "insufficient_evidence"
 
+def _personal_expression_indicator(temporal: TemporalContext) -> WellbeingIndicator:
+    """Gated indicator assuming context_type == personal_expression (coverage already ok)."""
+    feats = temporal.features
     persistence = float(feats.negative_persistence or 0.0)
     trajectory = str(feats.trajectory or "")
     longest_run = int(feats.longest_negative_run or 0)
@@ -97,12 +97,40 @@ def compute_wellbeing_indicator(
     return "low_concern"
 
 
+def compute_wellbeing_indicator(
+    temporal: TemporalContext,
+    *,
+    context_type: ContextType | str = "uncertain",
+) -> WellbeingIndicator:
+    """Return a conservative categorical indicator from deterministic facts + context."""
+    if _coverage_insufficient(temporal):
+        return "insufficient_evidence"
+
+    ctx = str(context_type or "uncertain").strip().lower()
+    if ctx != "personal_expression":
+        # Conservative POC: only personal_expression may leave insufficient_evidence.
+        # humor_or_sarcasm / quoted / informational / etc. → insufficient_evidence.
+        return "insufficient_evidence"
+
+    return _personal_expression_indicator(temporal)
+
+
+def personal_expression_wellbeing_candidate(
+    temporal: TemporalContext,
+) -> WellbeingIndicator:
+    """Deterministic candidate used when context_type resolves to personal_expression.
+
+    If coverage is insufficient, returns insufficient_evidence. The LLM must not
+    override this gated result.
+    """
+    if _coverage_insufficient(temporal):
+        return "insufficient_evidence"
+    return _personal_expression_indicator(temporal)
+
+
 def wellbeing_indicator_label(indicator: WellbeingIndicator | str) -> str:
-    """Human-readable label for UI display."""
-    mapping = {
-        "low_concern": "Low concern",
-        "moderate_concern": "Moderate concern",
-        "high_concern": "High concern",
-        "insufficient_evidence": "Insufficient evidence",
-    }
-    return mapping.get(str(indicator), str(indicator).replace("_", " ").title())
+    """Human-readable client label for UI display (Stress categories)."""
+    key = str(indicator)
+    if key in WELLBEING_CLIENT_LABELS:
+        return WELLBEING_CLIENT_LABELS[key]
+    return key.replace("_", " ").title()

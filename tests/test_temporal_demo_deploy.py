@@ -127,11 +127,12 @@ def test_openrouter_defaults_in_bundle(deploy_ready: Path) -> None:
     cfg = (deploy_ready / "src" / "config.py").read_text(encoding="utf-8")
     assert 'TEMPORAL_REASONER_PROVIDER = "openrouter"' in cfg
     assert 'TEMPORAL_REASONER_FALLBACK = "none"' in cfg
-    assert 'OPENROUTER_REASONER_MODEL = "google/gemma-4-26b-a4b-it:free"' in cfg
+    assert 'OPENROUTER_REASONER_MODEL = "nex-agi/nex-n2-pro:free"' in cfg
     assert (
-        'OPENROUTER_REASONER_FALLBACK_MODELS = "dots-studio/dots-3-note-preview:free"'
+        'OPENROUTER_REASONER_FALLBACK_MODELS = "minimax/minimax-m3:free"'
         in cfg
     )
+    assert "gemma" not in cfg.lower()
     assert "openai/gpt-oss-20b:free" not in cfg
     assert 'OPENROUTER_REASONER_MODEL = "openrouter/free"' not in cfg
     assert 'TEMPORAL_REASONER_FALLBACK = "none"' in cfg
@@ -187,14 +188,14 @@ def test_qwen_not_default_provider(deploy_ready: Path) -> None:
         ")\n"
         "assert TEMPORAL_REASONER_PROVIDER == 'openrouter'\n"
         "assert TEMPORAL_REASONER_FALLBACK == 'none'\n"
-        "assert OPENROUTER_REASONER_MODEL == 'google/gemma-4-26b-a4b-it:free'\n"
+        "assert OPENROUTER_REASONER_MODEL == 'nex-agi/nex-n2-pro:free'\n"
         "assert OPENROUTER_REASONER_FALLBACK_MODELS == "
-        "'dots-studio/dots-3-note-preview:free'\n"
+        "'minimax/minimax-m3:free'\n"
         "cfg = resolve_temporal_reasoner_config()\n"
         "assert cfg.provider == 'openrouter'\n"
         "assert cfg.fallback == 'none'\n"
         "assert cfg.openrouter_fallback_models == "
-        "['dots-studio/dots-3-note-preview:free']\n"
+        "['minimax/minimax-m3:free']\n"
         "print('ok')\n"
     )
     proc = subprocess.run(

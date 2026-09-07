@@ -32,9 +32,9 @@ def _deterministic_highlights(
     temporal: TemporalContext,
     *,
     valid_evidence_ids: Optional[set[str]] = None,
-    limit: int = 4,
+    limit: int = 5,
 ) -> list[TemporalHighlight]:
-    """Build 1–4 highlights from authoritative deterministic features only."""
+    """Build 1–5 highlights from authoritative deterministic features only."""
     feats = temporal.features
     out: list[TemporalHighlight] = []
     allow = valid_evidence_ids
@@ -61,7 +61,7 @@ def _deterministic_highlights(
                 start=start,
                 end=end,
                 timestamp_label=format_timestamp_range(start, end),
-                description="Sudden increase in negative expressed content.",
+                description="Negative emotional shift detected",
                 evidence_ids=evid,
             ),
         )
@@ -74,8 +74,48 @@ def _deterministic_highlights(
                 start=float(strongest.start),
                 end=float(strongest.end),
                 timestamp_label=format_timestamp_range(strongest.start, strongest.end),
-                description="Strongest negative window in the observed timeline.",
+                description="Strongest negative period",
                 evidence_ids=evid,
+            ),
+        )
+
+    # Elevated negative run: consecutive usable negative windows (persistence cue).
+    elevated_added = False
+    run_windows = []
+    for w in temporal.windows:
+        if w.usable and (
+            w.dominant_label == "negative"
+            or (
+                w.negative_probability is not None
+                and float(w.negative_probability) >= 0.45
+            )
+        ):
+            run_windows.append(w)
+        else:
+            if len(run_windows) >= 2 and not elevated_added:
+                first, last = run_windows[0], run_windows[-1]
+                out.append(
+                    TemporalHighlight(
+                        start=float(first.start),
+                        end=float(last.end),
+                        timestamp_label=format_timestamp_range(first.start, last.end),
+                        description="Negative expression remained elevated",
+                        evidence_ids=_ok(
+                            [f"window-{rw.index}" for rw in run_windows[:3]],
+                        ),
+                    ),
+                )
+                elevated_added = True
+            run_windows = []
+    if len(run_windows) >= 2 and not elevated_added:
+        first, last = run_windows[0], run_windows[-1]
+        out.append(
+            TemporalHighlight(
+                start=float(first.start),
+                end=float(last.end),
+                timestamp_label=format_timestamp_range(first.start, last.end),
+                description="Negative expression remained elevated",
+                evidence_ids=_ok([f"window-{rw.index}" for rw in run_windows[:3]]),
             ),
         )
 
@@ -90,7 +130,7 @@ def _deterministic_highlights(
                     conflict.window_start,
                     conflict.window_end,
                 ),
-                description=f"Cross-modal disagreement between {mods}.",
+                description=f"Cross-modal disagreement between {mods}",
                 evidence_ids=evid,
             ),
         )
@@ -116,9 +156,9 @@ def _deterministic_highlights(
             continue
         label = w.dominant_label or "unclear"
         desc = (
-            "Lower-negative / non-negative expressed evidence."
+            "Lower-negative / non-negative expressed evidence"
             if label != "negative"
-            else "Negative expressed evidence in this window."
+            else "Negative expressed evidence in this window"
         )
         return [
             TemporalHighlight(
@@ -136,8 +176,9 @@ def _highlights_from_reasoning(
     reasoning: TemporalReasoningResult,
     *,
     valid_evidence_ids: Optional[set[str]] = None,
-    limit: int = 4,
+    limit: int = 5,
 ) -> list[TemporalHighlight]:
+    """Advisory only — client highlights prefer deterministic timestamps."""
     out: list[TemporalHighlight] = []
     allow = valid_evidence_ids
     for transition in reasoning.important_transitions:
@@ -223,17 +264,12 @@ def build_final_temporal_assessment(
     )
     indicator = compute_wellbeing_indicator(temporal, context_type=context_type)
 
-    highlights: list[TemporalHighlight] = []
-    if explanation_ok and reasoning is not None:
-        highlights = _highlights_from_reasoning(
-            reasoning,
-            valid_evidence_ids=valid_evidence_ids,
-        )
-    if not highlights:
-        highlights = _deterministic_highlights(
-            temporal,
-            valid_evidence_ids=valid_evidence_ids,
-        )
+    # Client highlights are deterministic-only so the LLM cannot invent timestamps.
+    highlights = _deterministic_highlights(
+        temporal,
+        valid_evidence_ids=valid_evidence_ids,
+        limit=5,
+    )
 
     if explanation_ok and reasoning is not None:
         summary = (reasoning.summary or "").strip()
@@ -252,7 +288,7 @@ def build_final_temporal_assessment(
 
     return FinalTemporalAssessment(
         overall_wellbeing_indicator=indicator,
-        key_temporal_highlights=highlights[:4],
+        key_temporal_highlights=highlights[:5],
         summary_explanation=summary,
         evidence_summary=_evidence_summary(temporal, reasoning),
         uncertainty_note=_uncertainty_note(

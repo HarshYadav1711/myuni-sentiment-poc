@@ -145,12 +145,16 @@ def test_render_video_visual_only() -> None:
     )
     html = render_routed_result(routed)
     assert "VIDEO" in html
-    assert "Visual Evidence" in html
-    assert "Speech Evidence" in html
-    assert NO_SPEECH_MESSAGE in html
-    assert "visual evidence only" in html.lower()
+    # Client main view is wellbeing-focused; engineering stays in Technical Details.
+    assert "Visual Evidence" not in html
+    assert "Speech Evidence" not in html
+    assert "Overall Sentiment" not in html
     tech = render_technical_details(routed)
     assert "google/siglip2-base-patch16-224" in tech or DEFAULT_VISUAL_MODEL in tech
+    assert "SigLIP" in tech
+    assert "Speech" in tech
+    assert "Overall sentiment" in tech or "Fusion modalities" in tech
+    assert "visual evidence only" in tech.lower() or "visual" in tech.lower()
 
 
 def test_ocr_unavailable_stays_in_technical_details() -> None:

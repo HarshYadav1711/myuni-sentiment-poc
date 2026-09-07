@@ -153,18 +153,22 @@ def _fake_http_response(payload: dict, *, status: int = 200) -> SimpleNamespace:
 
 
 def test_openrouter_model_id_default() -> None:
-    assert OPENROUTER_REASONER_MODEL == "google/gemma-4-26b-a4b-it:free"
-    assert OPENROUTER_REASONER_FALLBACK_MODELS == "dots-studio/dots-3-note-preview:free"
+    assert OPENROUTER_REASONER_MODEL == "nex-agi/nex-n2-pro:free"
+    assert OPENROUTER_REASONER_FALLBACK_MODELS == "minimax/minimax-m3:free"
     cfg = resolve_temporal_reasoner_config()
     assert cfg.provider == "openrouter"
-    assert cfg.model_id == "google/gemma-4-26b-a4b-it:free"
-    assert cfg.openrouter_fallback_models == ["dots-studio/dots-3-note-preview:free"]
+    assert cfg.model_id == "nex-agi/nex-n2-pro:free"
+    assert cfg.openrouter_fallback_models == ["minimax/minimax-m3:free"]
     assert cfg.fallback == "none"
     assert "gpt-oss" not in cfg.model_id
     assert cfg.model_id != "openrouter/free"
     for mid in [cfg.model_id, *cfg.openrouter_fallback_models]:
         assert ":free" in mid
         assert "gpt-oss" not in mid
+        assert "gemma" not in mid.lower()
+        assert "dots-studio" not in mid.lower()
+    assert "gemma" not in OPENROUTER_REASONER_MODEL.lower()
+    assert "gemma" not in OPENROUTER_REASONER_FALLBACK_MODELS.lower()
 
 
 def test_openrouter_model_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -176,15 +180,15 @@ def test_openrouter_model_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
     cfg = resolve_temporal_reasoner_config()
     assert cfg.model_id == "some-other/free-model"
     assert cfg.model_id != "openai/gpt-oss-20b"
-    assert cfg.model_id != "google/gemma-4-26b-a4b-it:free"
+    assert cfg.model_id != "nex-agi/nex-n2-pro:free"
     assert cfg.openrouter_fallback_models == ["alt/free-a", "alt/free-b"]
 
 
 def test_parse_openrouter_fallback_models() -> None:
     assert parse_openrouter_fallback_models("") == []
     assert parse_openrouter_fallback_models(
-        "dots-studio/dots-3-note-preview:free, other/free",
-    ) == ["dots-studio/dots-3-note-preview:free", "other/free"]
+        "minimax/minimax-m3:free, other/free",
+    ) == ["minimax/minimax-m3:free", "other/free"]
     assert parse_openrouter_fallback_models(
         "a:free, a:free, b:free",
     ) == ["a:free", "b:free"]
@@ -217,10 +221,10 @@ def test_openrouter_request_shape_and_auth_header(monkeypatch: pytest.MonkeyPatc
         system=OPENROUTER_SYSTEM_INSTRUCTION,
         user="hello",
         max_tokens=768,
-        fallback_models=["dots-studio/dots-3-note-preview:free"],
+        fallback_models=["minimax/minimax-m3:free"],
     )
-    assert body["model"] == "google/gemma-4-26b-a4b-it:free"
-    assert body["models"] == ["dots-studio/dots-3-note-preview:free"]
+    assert body["model"] == "nex-agi/nex-n2-pro:free"
+    assert body["models"] == ["minimax/minimax-m3:free"]
     assert body["response_format"]["type"] == "json_object"
     assert "json_schema" not in body["response_format"]
     assert body["provider"]["require_parameters"] is True
@@ -250,8 +254,8 @@ def test_openrouter_request_shape_and_auth_header(monkeypatch: pytest.MonkeyPatc
     assert captured["url"] == OPENROUTER_API_URL
     assert captured["headers"]["authorization"] == "Bearer test-secret-key-do-not-log"
     assert captured["headers"]["content-type"] == "application/json"
-    assert captured["body"]["model"] == "google/gemma-4-26b-a4b-it:free"
-    assert captured["body"]["models"] == ["dots-studio/dots-3-note-preview:free"]
+    assert captured["body"]["model"] == "nex-agi/nex-n2-pro:free"
+    assert captured["body"]["models"] == ["minimax/minimax-m3:free"]
     assert captured["body"]["response_format"]["type"] == "json_object"
     assert "json_schema" not in captured["body"]["response_format"]
     assert captured["body"]["provider"]["require_parameters"] is True
@@ -345,13 +349,13 @@ def test_routed_model_recorded_when_returned(monkeypatch: pytest.MonkeyPatch) ->
     )
 
     def fake_post(body, *, api_key, api_url, timeout_seconds):  # noqa: ANN001
-        assert body["model"] == "google/gemma-4-26b-a4b-it:free"
-        assert body["models"] == ["dots-studio/dots-3-note-preview:free"]
+        assert body["model"] == "nex-agi/nex-n2-pro:free"
+        assert body["models"] == ["minimax/minimax-m3:free"]
         assert "gpt-oss-20b" not in body["model"]
         assert body["response_format"]["type"] == "json_object"
         return {
             "id": "gen-1",
-            "model": "google/gemma-4-26b-a4b-it",
+            "model": "nex-agi/nex-n2-pro",
             "choices": [{"message": {"content": raw}}],
             "usage": {"prompt_tokens": 1, "completion_tokens": 2},
         }
@@ -362,15 +366,15 @@ def test_routed_model_recorded_when_returned(monkeypatch: pytest.MonkeyPatch) ->
     )
     result, diag = reasoner.reason(ctx)
     assert result.status == "ok"
-    assert diag.openrouter_routed_model == "google/gemma-4-26b-a4b-it"
-    assert result.model == "google/gemma-4-26b-a4b-it"
+    assert diag.openrouter_routed_model == "nex-agi/nex-n2-pro"
+    assert result.model == "nex-agi/nex-n2-pro"
     assert result.model != "openai/gpt-oss-20b"
     assert result.model != "openai/gpt-oss-20b:free"
     assert (diag.generation_kwargs or {}).get("requested_model") == (
-        "google/gemma-4-26b-a4b-it:free"
+        "nex-agi/nex-n2-pro:free"
     )
     assert (diag.generation_kwargs or {}).get("fallback_models") == [
-        "dots-studio/dots-3-note-preview:free",
+        "minimax/minimax-m3:free",
     ]
 
 
@@ -389,11 +393,11 @@ def test_fallback_model_can_satisfy_successful_response(
     )
 
     def fake_post(body, *, api_key, api_url, timeout_seconds):  # noqa: ANN001
-        assert body["model"] == "google/gemma-4-26b-a4b-it:free"
-        assert body["models"] == ["dots-studio/dots-3-note-preview:free"]
+        assert body["model"] == "nex-agi/nex-n2-pro:free"
+        assert body["models"] == ["minimax/minimax-m3:free"]
         return {
             "id": "gen-fb",
-            "model": "dots-studio/dots-3-note-preview:free",
+            "model": "minimax/minimax-m3:free",
             "choices": [{"message": {"content": raw}}],
             "usage": {"prompt_tokens": 2, "completion_tokens": 3},
         }
@@ -404,11 +408,11 @@ def test_fallback_model_can_satisfy_successful_response(
     )
     result, diag = reasoner.reason(ctx)
     assert result.status == "ok"
-    assert diag.openrouter_routed_model == "dots-studio/dots-3-note-preview:free"
-    assert result.model == "dots-studio/dots-3-note-preview:free"
-    assert result.model != "google/gemma-4-26b-a4b-it:free"
+    assert diag.openrouter_routed_model == "minimax/minimax-m3:free"
+    assert result.model == "minimax/minimax-m3:free"
+    assert result.model != "nex-agi/nex-n2-pro:free"
     assert (diag.generation_kwargs or {}).get("requested_model") == (
-        "google/gemma-4-26b-a4b-it:free"
+        "nex-agi/nex-n2-pro:free"
     )
 
 
@@ -482,12 +486,12 @@ def test_404_model_unavailable_fail_soft(monkeypatch: pytest.MonkeyPatch) -> Non
 
 def test_no_paid_gpt_oss_fallback_in_defaults() -> None:
     cfg = resolve_temporal_reasoner_config()
-    assert cfg.model_id == "google/gemma-4-26b-a4b-it:free"
+    assert cfg.model_id == "nex-agi/nex-n2-pro:free"
     assert cfg.fallback == "none"
     assert cfg.model_id != "openai/gpt-oss-20b"
     assert "gpt-oss-20b" not in cfg.model_id
     assert cfg.model_id != "openrouter/free"
-    assert cfg.openrouter_fallback_models == ["dots-studio/dots-3-note-preview:free"]
+    assert cfg.openrouter_fallback_models == ["minimax/minimax-m3:free"]
     body = build_openrouter_request_body(
         model_id=cfg.model_id,
         system=OPENROUTER_SYSTEM_INSTRUCTION,
@@ -495,8 +499,8 @@ def test_no_paid_gpt_oss_fallback_in_defaults() -> None:
         max_tokens=16,
         fallback_models=cfg.openrouter_fallback_models,
     )
-    assert body["model"] == "google/gemma-4-26b-a4b-it:free"
-    assert body["models"] == ["dots-studio/dots-3-note-preview:free"]
+    assert body["model"] == "nex-agi/nex-n2-pro:free"
+    assert body["models"] == ["minimax/minimax-m3:free"]
     assert body["response_format"]["type"] == "json_object"
     assert "json_schema" not in body["response_format"]
     assert body["provider"]["require_parameters"] is True
@@ -1017,6 +1021,107 @@ def test_no_numerical_wellbeing_score() -> None:
     assert "/10" not in dumped
     assert "/100" not in dumped
     assert "wellbeing_score" not in dumped
+    from src.temporal.wellbeing import wellbeing_indicator_label
+
+    label = wellbeing_indicator_label(final.overall_wellbeing_indicator)
+    assert label in {"Low Stress", "Moderate Stress", "High Stress", "Insufficient Evidence"}
+    assert "/" not in label
+
+
+def test_client_wellbeing_label_mapping() -> None:
+    from src.temporal.wellbeing import wellbeing_indicator_label
+
+    assert wellbeing_indicator_label("low_concern") == "Low Stress"
+    assert wellbeing_indicator_label("moderate_concern") == "Moderate Stress"
+    assert wellbeing_indicator_label("high_concern") == "High Stress"
+    assert wellbeing_indicator_label("insufficient_evidence") == "Insufficient Evidence"
+
+
+def test_roberta_sentiment_labels_unchanged() -> None:
+    """Twitter-RoBERTa remains the base pos/neutral/neg sentiment producer."""
+    from src.config import DEFAULT_TEXT_MODEL
+
+    assert "roberta" in DEFAULT_TEXT_MODEL.lower()
+    evidence = _ev("negative")
+    assert set(evidence.probabilities.keys()) == {"positive", "neutral", "negative"}
+    assert evidence.label in {"positive", "neutral", "negative"}
+
+
+def test_wellbeing_is_downstream_of_sentiment_not_roberta_replacement() -> None:
+    ctx = fixture_persistent_negative()
+    # RoBERTa-style labels live on windows; wellbeing is a separate gated enum.
+    for w in ctx.windows:
+        if w.dominant_label:
+            assert w.dominant_label in {"positive", "neutral", "negative"}
+    indicator = compute_wellbeing_indicator(ctx, context_type="personal_expression")
+    assert indicator in {
+        "low_concern",
+        "moderate_concern",
+        "high_concern",
+        "insufficient_evidence",
+    }
+    assert indicator not in {"positive", "neutral", "negative"}
+
+
+def test_deterministic_highlights_chronological_real_timestamps() -> None:
+    ctx = fixture_persistent_negative()
+    reasoning = TemporalReasoningResult(
+        summary="Grounded summary of increasing negative evidence.",
+        trajectory_explanation="Trajectory preserved.",
+        context_type="personal_expression",
+        confidence=0.6,
+        status="ok",
+        important_transitions=[
+            {
+                "start": 999.0,
+                "end": 1000.0,
+                "description": "Invented far-future transition",
+                "evidence_ids": ["window-0"],
+            },
+        ],
+        model=OPENROUTER_REASONER_MODEL,
+    )
+    final = build_final_temporal_assessment(ctx, reasoning)
+    assert final.key_temporal_highlights
+    starts = [h.start for h in final.key_temporal_highlights]
+    assert starts == sorted(starts)
+    max_end = max(float(w.end) for w in ctx.windows) if ctx.windows else 0.0
+    for h in final.key_temporal_highlights:
+        assert h.start <= h.end
+        assert h.end <= max_end + 1e-6
+        assert "999" not in h.timestamp_label
+        assert "Invented" not in h.description
+
+
+def test_llm_cannot_overwrite_wellbeing_classification() -> None:
+    ctx = fixture_persistent_negative()
+    expected = compute_wellbeing_indicator(ctx, context_type="personal_expression")
+    reasoning = TemporalReasoningResult(
+        summary="The wellbeing score is 9.5/10 High Stress based on vibes.",
+        trajectory_explanation="Ignored rewrite attempt.",
+        context_type="personal_expression",
+        confidence=0.99,
+        status="ok",
+        model=OPENROUTER_REASONER_MODEL,
+    )
+    final = build_final_temporal_assessment(ctx, reasoning)
+    assert final.overall_wellbeing_indicator == expected
+    # Summary may contain model prose, but classification enum is system-gated.
+    assert final.overall_wellbeing_indicator != "high_concern" or expected == "high_concern"
+    dumped = json.dumps(final.model_dump(exclude={"summary_explanation"}))
+    assert "9.5/10" not in dumped
+
+
+def test_summary_grounding_requires_evidence_payload_contract() -> None:
+    ctx = fixture_stable_neutral()
+    payload = build_evidence_payload(ctx, config=_openrouter_cfg())
+    gating = payload.get("system_wellbeing_gating") or {}
+    assert "if_personal_expression_indicator" in gating
+    assert "summary_must_explain" in gating
+    assert "trajectory" in gating["summary_must_explain"]
+    assert "AUTHORITATIVE" in str(gating.get("note", "")).upper() or (
+        "must not" in str(gating.get("note", "")).lower()
+    )
 
 
 def test_conservative_insufficient_and_quoted_informational() -> None:
@@ -1081,11 +1186,15 @@ def test_client_ui_hides_benchmark_metrics() -> None:
         model_id="poc",
     )
     html = render_routed_result(routed)
-    assert "Overall Wellbeing Indicator" in html
-    assert "POC content-level indicator — not a clinical assessment." in html
+    assert "Overall Well-Being Score" in html
+    assert "Moderate Stress" in html
+    assert "POC content-level wellbeing indicator — not a clinical assessment." in html
     assert "Key Temporal Highlights" in html
     assert "00:10–00:15" in html
     assert "Summary Explanation" in html
+    assert "Overall Sentiment" not in html
+    assert "Visual Evidence" not in html
+    assert "Speech Evidence" not in html
     assert "benchmark" not in html.lower()
     assert "prompt tokens" not in html.lower()
     assert "generated tokens" not in html.lower()
@@ -1093,6 +1202,9 @@ def test_client_ui_hides_benchmark_metrics() -> None:
     assert "gpu" not in html.lower()
     assert "/10" not in html
     assert "/100" not in html
+    tech = render_technical_details(routed)
+    assert "moderate_concern" in tech or "Moderate Stress" in tech
+    assert "Overall sentiment" in tech or "SigLIP" in tech or "Twitter-RoBERTa" in tech
 
     # Text path unchanged — no temporal highlights invented
     text_result = ActivityAnalysisResult(
@@ -1114,6 +1226,7 @@ def test_client_ui_hides_benchmark_metrics() -> None:
         ),
     )
     assert "Key Temporal Highlights" not in text_html
+    assert "Overall Well-Being Score" not in text_html
     assert "Overall Wellbeing Indicator" not in text_html
 
 
@@ -1181,12 +1294,12 @@ def test_request_payload_json_serializable_real_fixture() -> None:
         system=OPENROUTER_SYSTEM_INSTRUCTION,
         user=user,
         max_tokens=768,
-        fallback_models=["dots-studio/dots-3-note-preview:free"],
+        fallback_models=["minimax/minimax-m3:free"],
     )
     raw = assert_json_serializable(body)
     parsed = json.loads(raw.decode("utf-8"))
     assert parsed["model"] == OPENROUTER_REASONER_MODEL
-    assert parsed["models"] == ["dots-studio/dots-3-note-preview:free"]
+    assert parsed["models"] == ["minimax/minimax-m3:free"]
     assert parsed["response_format"]["type"] == "json_object"
     assert "json_schema" not in parsed["response_format"]
     assert parsed["provider"]["require_parameters"] is True

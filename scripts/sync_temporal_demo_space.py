@@ -116,7 +116,7 @@ No numerical wellbeing score (no X/10 or X/100). Not a psychiatric diagnosis.
 | Faster-Whisper `base.en` | CPU int8 |
 | Twitter-RoBERTa | CPU |
 | Temporal features | CPU |
-| Contextual reasoner | OpenRouter HTTP (`google/gemma-4-26b-a4b-it:free`, fallback `dots-studio/dots-3-note-preview:free`) |
+| Contextual reasoner | OpenRouter HTTP (`nex-agi/nex-n2-pro:free`, fallback `minimax/minimax-m3:free`) |
 
 Qwen is **not** invoked by default and is not on the ZeroGPU path.
 
@@ -133,8 +133,8 @@ Never commit this value. The app only reports configured/unconfigured.
 | Variable | Default |
 | --- | --- |
 | `TEMPORAL_REASONER_PROVIDER` | `openrouter` |
-| `OPENROUTER_REASONER_MODEL` | `google/gemma-4-26b-a4b-it:free` |
-| `OPENROUTER_REASONER_FALLBACK_MODELS` | `dots-studio/dots-3-note-preview:free` |
+| `OPENROUTER_REASONER_MODEL` | `nex-agi/nex-n2-pro:free` |
+| `OPENROUTER_REASONER_FALLBACK_MODELS` | `minimax/minimax-m3:free` |
 | `TEMPORAL_REASONER_FALLBACK` | `none` |
 
 Keep fallback at `none` so OpenRouter failures do not consume ZeroGPU quota via Qwen.
@@ -209,8 +209,8 @@ def _write_push_instructions(dest: Path) -> None:
    - `OPENROUTER_API_KEY` = (your OpenRouter key)
    Optional Variables:
    - `TEMPORAL_REASONER_PROVIDER=openrouter`
-   - `OPENROUTER_REASONER_MODEL=google/gemma-4-26b-a4b-it:free`
-   - `OPENROUTER_REASONER_FALLBACK_MODELS=dots-studio/dots-3-note-preview:free`
+   - `OPENROUTER_REASONER_MODEL=nex-agi/nex-n2-pro:free`
+   - `OPENROUTER_REASONER_FALLBACK_MODELS=minimax/minimax-m3:free`
    - `TEMPORAL_REASONER_FALLBACK=none`
 
 5. Commit and push from the Space clone (user action only):
