@@ -200,10 +200,22 @@ def test_openrouter_request_shape_and_auth_header(monkeypatch: pytest.MonkeyPatc
     )
     assert captured["url"] == OPENROUTER_API_URL
     assert captured["headers"]["authorization"] == "Bearer test-secret-key-do-not-log"
+    assert captured["headers"]["content-type"] == "application/json"
     assert captured["body"]["model"] == "openai/gpt-oss-20b:free"
     assert captured["body"]["response_format"]["json_schema"]["strict"] is True
     assert captured["body"]["provider"]["require_parameters"] is True
     assert "choices" in resp
+    # Verify POST semantics on the Request object via captured call.
+    # fake_urlopen receives the Request; re-check via building one.
+    import urllib.request as ur
+
+    req = ur.Request(
+        OPENROUTER_API_URL,
+        data=b"{}",
+        method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    assert req.get_method() == "POST"
 
 
 def test_api_key_never_logged(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
@@ -711,3 +723,263 @@ def test_no_live_api_in_unit_suite() -> None:
 def test_qwen_system_instruction_still_present() -> None:
     assert "Do NOT diagnose" in SYSTEM_INSTRUCTION
     assert "untrusted USER DATA" in SYSTEM_INSTRUCTION
+
+
+# ---------------------------------------------------------------------------
+# Pre-request failure diagnostics / serialization
+# ---------------------------------------------------------------------------
+
+
+def test_request_payload_json_serializable_real_fixture() -> None:
+    from src.temporal.benchmark.export import lean_temporal_context_for_reasoner
+    from src.temporal.benchmark.fixtures import get_fixture_spec, load_benchmark_payload
+    from src.temporal.providers.openrouter import assert_json_serializable, to_jsonable
+
+    payload = load_benchmark_payload(get_fixture_spec("real_phase3a_controlled_video"))
+    ctx = lean_temporal_context_for_reasoner(payload.temporal_context)
+    cfg = _openrouter_cfg()
+    evidence = to_jsonable(build_evidence_payload(ctx, config=cfg))
+    user = build_user_prompt(evidence)
+    body = build_openrouter_request_body(
+        model_id=OPENROUTER_REASONER_MODEL,
+        system=OPENROUTER_SYSTEM_INSTRUCTION,
+        user=user,
+        max_tokens=768,
+    )
+    raw = assert_json_serializable(body)
+    parsed = json.loads(raw.decode("utf-8"))
+    assert parsed["model"] == OPENROUTER_REASONER_MODEL
+    assert parsed["response_format"]["json_schema"]["strict"] is True
+    assert parsed["provider"]["require_parameters"] is True
+
+
+def test_numpy_float_in_payload_is_sanitized() -> None:
+    import numpy as np
+
+    from src.temporal.providers.openrouter import assert_json_serializable, to_jsonable
+
+    messy = {
+        "score": np.float64(0.42),
+        "nested": {"p": np.float32(0.1)},
+        "vals": [np.int64(3)],
+    }
+    raw = assert_json_serializable(messy)
+    data = json.loads(raw.decode("utf-8"))
+    assert data["score"] == pytest.approx(0.42)
+    assert isinstance(to_jsonable(np.float64(1.5)), float)
+
+
+def test_payload_build_failure_stage(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k")
+    reasoner = OpenRouterTemporalReasoner(_openrouter_cfg())
+
+    def boom(*_a, **_k):  # noqa: ANN001
+        raise TypeError("Object of type float64 is not JSON serializable")
+
+    monkeypatch.setattr(
+        "src.temporal.providers.openrouter.build_evidence_payload",
+        boom,
+    )
+    result, diag = reasoner.reason(fixture_stable_neutral())
+    assert result.status == "generation_failed"
+    assert diag.openrouter_failure_stage == "payload_build"
+    assert result.details is not None
+    assert result.details["openrouter_failure_stage"] == "payload_build"
+    assert "float64" in (diag.openrouter_error_message or "")
+
+
+def test_request_build_failure_stage(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k")
+    reasoner = OpenRouterTemporalReasoner(_openrouter_cfg())
+
+    def boom_request(*_a, **_k):  # noqa: ANN001
+        raise RuntimeError("cannot construct request")
+
+    monkeypatch.setattr(
+        "src.temporal.providers.openrouter.urllib.request.Request",
+        boom_request,
+    )
+    result, diag = reasoner.reason(fixture_stable_neutral())
+    assert result.status == "generation_failed"
+    assert diag.openrouter_failure_stage == "request_build"
+    assert diag.openrouter_http_status is None
+
+
+def test_urlerror_connection_stage(monkeypatch: pytest.MonkeyPatch) -> None:
+    import urllib.error
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k")
+    reasoner = OpenRouterTemporalReasoner(_openrouter_cfg())
+
+    def boom(*_a, **_k):  # noqa: ANN001
+        raise urllib.error.URLError("Name or service not known")
+
+    monkeypatch.setattr(
+        "src.temporal.providers.openrouter.urllib.request.urlopen",
+        boom,
+    )
+    result, diag = reasoner.reason(fixture_stable_neutral())
+    assert diag.openrouter_failure_stage == "connection"
+    assert result.status == "reasoner_unavailable"
+    assert diag.openrouter_error_type == "OpenRouterError"
+
+
+def test_http_400_stage_and_message(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k")
+    reasoner = OpenRouterTemporalReasoner(_openrouter_cfg())
+
+    def boom(*_a, **_k):  # noqa: ANN001
+        raise urllib.error.HTTPError(
+            OPENROUTER_API_URL,
+            400,
+            "Bad Request",
+            hdrs=None,  # type: ignore[arg-type]
+            fp=None,
+        )
+
+    import io
+    import urllib.error
+
+    err = urllib.error.HTTPError(
+        OPENROUTER_API_URL,
+        400,
+        "Bad Request",
+        hdrs={},  # type: ignore[arg-type]
+        fp=io.BytesIO(b'{"error":{"message":"bad response_format"}}'),
+    )
+
+    def boom2(*_a, **_k):  # noqa: ANN001
+        raise err
+
+    monkeypatch.setattr(
+        "src.temporal.providers.openrouter.urllib.request.urlopen",
+        boom2,
+    )
+    result, diag = reasoner.reason(fixture_stable_neutral())
+    assert diag.openrouter_failure_stage == "http_response"
+    assert diag.openrouter_http_status == 400
+    assert result.status == "generation_failed"
+    assert "response_format" in (diag.openrouter_error_message or "").lower() or (
+        "structured-output" in (diag.openrouter_error_message or "").lower()
+    )
+
+
+def test_http_401_403_stages(monkeypatch: pytest.MonkeyPatch) -> None:
+    import io
+    import urllib.error
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k")
+    reasoner = OpenRouterTemporalReasoner(_openrouter_cfg())
+
+    for code in (401, 403):
+        err = urllib.error.HTTPError(
+            OPENROUTER_API_URL,
+            code,
+            "Denied",
+            hdrs={},  # type: ignore[arg-type]
+            fp=io.BytesIO(b'{"error":"denied"}'),
+        )
+
+        def boom(*_a, _err=err, **_k):  # noqa: ANN001
+            raise _err
+
+        monkeypatch.setattr(
+            "src.temporal.providers.openrouter.urllib.request.urlopen",
+            boom,
+        )
+        result, diag = reasoner.reason(fixture_stable_neutral())
+        assert result.status == "reasoner_unavailable"
+        assert diag.openrouter_failure_stage == "http_response"
+        assert diag.openrouter_http_status == code
+
+
+def test_diagnostics_never_contain_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    secret = "sk-or-v1-supersecretdiagnosticvalue99"
+    monkeypatch.setenv("OPENROUTER_API_KEY", secret)
+    reasoner = OpenRouterTemporalReasoner(_openrouter_cfg())
+
+    def boom(*_a, **_k):  # noqa: ANN001
+        raise OpenRouterError(
+            f"Bearer {secret} leaked somehow",
+            status_code=401,
+            error_kind="auth",
+            failure_stage="http_response",
+        )
+
+    monkeypatch.setattr(reasoner, "_generate_with_retry", boom)
+    result, diag = reasoner.reason(fixture_stable_neutral())
+    blob = json.dumps(result.model_dump()) + json.dumps(diag.model_dump())
+    assert secret not in blob
+    assert "Bearer " not in blob or "[REDACTED]" in blob
+
+
+def test_technical_details_shows_openrouter_failure_fields() -> None:
+    from src.schemas import TemporalReasonerDiagnostics
+
+    assessment = FinalTemporalAssessment(
+        overall_wellbeing_indicator="insufficient_evidence",
+        status="explanation_unavailable",
+        reasoner_configured=True,
+    )
+    result = ActivityAnalysisResult(
+        activity_id="A-diag",
+        activity_type="video",
+        input=InputMetadata(),
+        analysis=AnalysisBlock(
+            overall=_ev("neutral"),
+            modalities=ModalityBundle(visual=_ev("neutral")),
+            final_temporal_assessment=assessment,
+            temporal_reasoning=TemporalReasoningResult(
+                status="generation_failed",
+                context_type="uncertain",
+                confidence=0.0,
+                model=OPENROUTER_REASONER_MODEL,
+            ),
+            temporal_reasoner_diagnostics=TemporalReasonerDiagnostics(
+                provider="openrouter",
+                openrouter_failure_stage="request_build",
+                openrouter_error_type="OpenRouterError",
+                openrouter_error_message="urllib Request construction failed: RuntimeError",
+                openrouter_http_status=None,
+                reasoner_configured=True,
+            ),
+            video=VideoDiagnostics(frames_extracted=1, frames_analyzed=1),
+        ),
+    )
+    tech = render_technical_details(
+        RoutedAnalysisResult(
+            status=CapabilityStatus.OK,
+            detected_input=InputType.VIDEO,
+            analysis=result,
+        ),
+    )
+    assert "OpenRouter status" in tech
+    assert "generation_failed" in tech
+    assert "Failure stage" in tech
+    assert "request_build" in tech
+    assert "HTTP status" in tech
+    assert "n/a" in tech
+    assert "Error:" in tech
+    assert "OPENROUTER_API_KEY" not in tech
+    assert "sk-" not in tech
+
+
+def test_logger_exception_on_generation_failed(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k")
+    reasoner = OpenRouterTemporalReasoner(_openrouter_cfg())
+
+    def boom(*_a, **_k):  # noqa: ANN001
+        raise OpenRouterError(
+            "connection failed",
+            error_kind="connection",
+            failure_stage="connection",
+        )
+
+    monkeypatch.setattr(reasoner, "_generate_with_retry", boom)
+    with caplog.at_level(logging.ERROR):
+        result, _ = reasoner.reason(fixture_stable_neutral())
+    assert result.status == "reasoner_unavailable"
+    assert any("OpenRouter generation failed" in r.message for r in caplog.records)

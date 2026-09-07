@@ -278,6 +278,23 @@ def render_technical_details(routed: Any) -> str:
                 )
                 if reasoner_diag.provider:
                     lines.append(f"**Reasoner provider:** `{reasoner_diag.provider}`")
+                if reasoning is not None and reasoner_diag.provider == "openrouter":
+                    http_disp = (
+                        reasoner_diag.openrouter_http_status
+                        if reasoner_diag.openrouter_http_status is not None
+                        else reasoner_diag.http_status
+                    )
+                    http_label = "n/a" if http_disp is None else str(http_disp)
+                    stage = reasoner_diag.openrouter_failure_stage or reasoner_diag.reasoner_failure_stage or "n/a"
+                    err = reasoner_diag.openrouter_error_message or reasoner_diag.reasoner_error_message or "n/a"
+                    lines.append(f"**OpenRouter status:** `{reasoning.status}`")
+                    lines.append(f"**Failure stage:** `{stage}`")
+                    lines.append(f"**HTTP status:** {http_label}")
+                    lines.append(f"**Error:** {err}")
+                    if reasoner_diag.openrouter_error_type:
+                        lines.append(
+                            f"**Error type:** `{reasoner_diag.openrouter_error_type}`"
+                        )
     if warnings:
         lines.append("**Pipeline notes:**")
         for warning in warnings[:8]:

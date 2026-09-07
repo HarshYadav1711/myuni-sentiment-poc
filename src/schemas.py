@@ -635,6 +635,21 @@ class TemporalReasonerDiagnostics(BaseModel):
         default=None,
         description="Whether an API key / backend was configured (never the secret).",
     )
+    # OpenRouter-specific safe diagnostics (never secrets).
+    openrouter_failure_stage: Optional[str] = Field(
+        default=None,
+        description=(
+            "payload_build | request_build | connection | http_response | "
+            "response_parse | schema_validation | unknown"
+        ),
+    )
+    openrouter_error_type: Optional[str] = None
+    openrouter_error_message: Optional[str] = None
+    openrouter_http_status: Optional[int] = None
+    openrouter_response_preview: Optional[str] = Field(
+        default=None,
+        description="Sanitized HTTP error body preview (no secrets).",
+    )
 
 
 class DeterministicTemporalContext(BaseModel):
