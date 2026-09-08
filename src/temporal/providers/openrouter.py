@@ -138,6 +138,7 @@ class OpenRouterError(Exception):
         retry_attempted: bool = False,
         failure_stage: str = "unknown",
         response_body_preview: Optional[str] = None,
+        response_shape: Optional[dict[str, Any]] = None,
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
@@ -147,6 +148,8 @@ class OpenRouterError(Exception):
         self.retry_attempted = retry_attempted
         self.failure_stage = failure_stage
         self.response_body_preview = response_body_preview
+        # Safe structural summary only — never raw content / reasoning text.
+        self.response_shape = response_shape
 
 
 def normalize_openrouter_fallback_models(
@@ -487,35 +490,226 @@ def extract_routed_model(response: dict[str, Any]) -> Optional[str]:
     return None
 
 
+def _content_structural_meta(content: Any) -> tuple[bool, Optional[str], Optional[int]]:
+    """Return (content_present, content_type, content_length) without storing text."""
+    if content is None:
+        return False, "null", None
+    if isinstance(content, str):
+        return bool(content.strip()), "str", len(content)
+    if isinstance(content, list):
+        length = 0
+        for part in content:
+            if isinstance(part, dict) and part.get("type") == "text":
+                length += len(str(part.get("text") or ""))
+            elif isinstance(part, str):
+                length += len(part)
+        return length > 0, "list", length
+    # Unexpected content types: report type only; never stringify payload into diagnostics.
+    return True, type(content).__name__, None
+
+
+def _reasoning_structural_meta(message: dict[str, Any]) -> tuple[bool, Optional[int], bool, Optional[int]]:
+    """Presence/length only for reasoning fields — never store reasoning text."""
+    reasoning_present = False
+    reasoning_length: Optional[int] = None
+    reasoning_details_present = False
+    reasoning_details_count: Optional[int] = None
+
+    for key in ("reasoning", "reasoning_content"):
+        val = message.get(key)
+        if isinstance(val, str) and val:
+            reasoning_present = True
+            reasoning_length = (reasoning_length or 0) + len(val)
+        elif val is not None:
+            # Non-string reasoning payload: mark present, do not coerce to text.
+            reasoning_present = True
+
+    details = message.get("reasoning_details")
+    if isinstance(details, list):
+        reasoning_details_present = True
+        reasoning_details_count = len(details)
+        if details:
+            reasoning_present = True
+    elif details is not None:
+        reasoning_details_present = True
+        reasoning_present = True
+
+    return (
+        reasoning_present,
+        reasoning_length,
+        reasoning_details_present,
+        reasoning_details_count,
+    )
+
+
+def summarize_openrouter_response_shape(
+    response: dict[str, Any],
+    *,
+    http_status: Optional[int] = None,
+) -> dict[str, Any]:
+    """Safe structural summary of a Chat Completions response.
+
+    NEVER stores Authorization, API keys, prompts, message content text,
+    reasoning text, or reasoning_details payloads.
+    """
+    top_keys = sorted(str(k) for k in response.keys())
+    choices = response.get("choices")
+    choices_count = len(choices) if isinstance(choices, list) else 0
+
+    finish_reason: Optional[str] = None
+    native_finish_reason: Optional[str] = None
+    message_keys: Optional[list[str]] = None
+    content_present = False
+    content_type: Optional[str] = None
+    content_length: Optional[int] = None
+    reasoning_present = False
+    reasoning_length: Optional[int] = None
+    reasoning_details_present = False
+    reasoning_details_count: Optional[int] = None
+
+    if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+        first = choices[0]
+        fr = first.get("finish_reason")
+        if isinstance(fr, str) and fr.strip():
+            finish_reason = fr.strip()
+        nfr = first.get("native_finish_reason")
+        if isinstance(nfr, str) and nfr.strip():
+            native_finish_reason = nfr.strip()
+        message = first.get("message")
+        if isinstance(message, dict):
+            message_keys = sorted(str(k) for k in message.keys())
+            content_present, content_type, content_length = _content_structural_meta(
+                message.get("content"),
+            )
+            (
+                reasoning_present,
+                reasoning_length,
+                reasoning_details_present,
+                reasoning_details_count,
+            ) = _reasoning_structural_meta(message)
+
+    usage_out: dict[str, int] = {}
+    usage = response.get("usage")
+    if isinstance(usage, dict):
+        for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+            raw = usage.get(key)
+            if raw is None:
+                continue
+            try:
+                usage_out[key] = int(raw)
+            except (TypeError, ValueError):
+                continue
+        details = usage.get("completion_tokens_details")
+        if isinstance(details, dict) and details.get("reasoning_tokens") is not None:
+            try:
+                usage_out["reasoning_tokens"] = int(details["reasoning_tokens"])
+            except (TypeError, ValueError):
+                pass
+
+    resp_id = response.get("id")
+    response_id_prefix: Optional[str] = None
+    if isinstance(resp_id, str) and resp_id.strip():
+        response_id_prefix = resp_id.strip()[:16]
+
+    shape: dict[str, Any] = {
+        "http_status": http_status,
+        "top_level_keys": top_keys,
+        "routed_model": extract_routed_model(response),
+        "choices_count": choices_count,
+        "finish_reason": finish_reason,
+        "native_finish_reason": native_finish_reason,
+        "message_keys": message_keys,
+        "content_present": content_present,
+        "content_type": content_type,
+        "content_length": content_length,
+        "reasoning_present": reasoning_present,
+        "reasoning_length": reasoning_length,
+        "reasoning_details_present": reasoning_details_present,
+        "reasoning_details_count": reasoning_details_count,
+        "usage": usage_out or None,
+        "response_id_prefix": response_id_prefix,
+    }
+    return shape
+
+
+def format_missing_content_error(
+    shape: dict[str, Any],
+    *,
+    empty: bool = False,
+) -> str:
+    """Compact structural missing/empty-content error — never includes reasoning text."""
+    label = "empty_content" if empty else "missing_content"
+    parts: list[str] = [f"{label}:"]
+    model = shape.get("routed_model")
+    if isinstance(model, str) and model.strip():
+        parts.append(f"model={model.strip()}")
+    finish = shape.get("finish_reason")
+    if isinstance(finish, str) and finish.strip():
+        parts.append(f"finish_reason={finish.strip()}")
+    native = shape.get("native_finish_reason")
+    if isinstance(native, str) and native.strip():
+        parts.append(f"native_finish_reason={native.strip()}")
+    parts.append(f"content_type={shape.get('content_type')}")
+    parts.append(f"content_present={bool(shape.get('content_present'))}")
+    if shape.get("content_length") is not None:
+        parts.append(f"content_length={shape.get('content_length')}")
+    parts.append(f"reasoning_present={bool(shape.get('reasoning_present'))}")
+    if shape.get("reasoning_length") is not None:
+        parts.append(f"reasoning_length={shape.get('reasoning_length')}")
+    parts.append(
+        f"reasoning_details_present={bool(shape.get('reasoning_details_present'))}"
+    )
+    if shape.get("reasoning_details_count") is not None:
+        parts.append(f"reasoning_details_count={shape.get('reasoning_details_count')}")
+    usage = shape.get("usage") if isinstance(shape.get("usage"), dict) else {}
+    if usage.get("completion_tokens") is not None:
+        parts.append(f"completion_tokens={usage.get('completion_tokens')}")
+    if usage.get("reasoning_tokens") is not None:
+        parts.append(f"reasoning_tokens={usage.get('reasoning_tokens')}")
+    if usage.get("prompt_tokens") is not None:
+        parts.append(f"prompt_tokens={usage.get('prompt_tokens')}")
+    return " ".join(parts)
+
+
 def extract_message_content(response: dict[str, Any]) -> str:
-    """Pull assistant message content from a Chat Completions response."""
+    """Pull assistant message content from a Chat Completions response.
+
+    Final application payload MUST come from ``message.content`` only.
+    Never treat ``reasoning`` / ``reasoning_content`` / ``reasoning_details``
+    as the TemporalReasoningResult source.
+    """
+    shape = summarize_openrouter_response_shape(response)
     choices = response.get("choices")
     if not isinstance(choices, list) or not choices:
         raise OpenRouterError(
-            "OpenRouter response missing choices",
+            format_missing_content_error(shape),
             error_kind="missing_content",
             failure_stage="response_parse",
+            response_shape=shape,
         )
     first = choices[0]
     if not isinstance(first, dict):
         raise OpenRouterError(
-            "OpenRouter choice malformed",
+            format_missing_content_error(shape),
             error_kind="missing_content",
             failure_stage="response_parse",
+            response_shape=shape,
         )
     message = first.get("message")
     if not isinstance(message, dict):
         raise OpenRouterError(
-            "OpenRouter message missing",
+            format_missing_content_error(shape),
             error_kind="missing_content",
             failure_stage="response_parse",
+            response_shape=shape,
         )
     content = message.get("content")
     if content is None:
         raise OpenRouterError(
-            "OpenRouter message content missing",
+            format_missing_content_error(shape, empty=False),
             error_kind="missing_content",
             failure_stage="response_parse",
+            response_shape=shape,
         )
     if isinstance(content, list):
         texts = []
@@ -528,9 +722,10 @@ def extract_message_content(response: dict[str, Any]) -> str:
     text = str(content).strip()
     if not text:
         raise OpenRouterError(
-            "OpenRouter message content empty",
+            format_missing_content_error(shape, empty=True),
             error_kind="missing_content",
             failure_stage="response_parse",
+            response_shape=shape,
         )
     return text
 
@@ -553,6 +748,21 @@ def _apply_openrouter_failure(
         diagnostics.http_status = exc.status_code
         if exc.response_body_preview:
             diagnostics.openrouter_response_preview = _redact(exc.response_body_preview)
+        shape = exc.response_shape if isinstance(exc.response_shape, dict) else None
+        if shape:
+            diagnostics.openrouter_response_shape = shape
+            routed = shape.get("routed_model")
+            if isinstance(routed, str) and routed.strip():
+                diagnostics.openrouter_routed_model = routed.strip()
+            usage = shape.get("usage") if isinstance(shape.get("usage"), dict) else {}
+            if usage.get("prompt_tokens") is not None:
+                diagnostics.prompt_tokens = int(usage["prompt_tokens"])
+            if usage.get("completion_tokens") is not None:
+                diagnostics.generated_tokens = int(usage["completion_tokens"])
+            # Hint truncation when finish_reason=length with no usable content.
+            if shape.get("finish_reason") == "length" and not shape.get("content_present"):
+                diagnostics.output_hit_token_limit = True
+                diagnostics.likely_output_truncation = True
 
 
 class OpenRouterTemporalReasoner:
@@ -713,6 +923,9 @@ class OpenRouterTemporalReasoner:
             routed_model = http_meta.get("routed_model")
             if isinstance(routed_model, str) and routed_model.strip():
                 diagnostics.openrouter_routed_model = routed_model.strip()
+            shape = http_meta.get("response_shape")
+            if isinstance(shape, dict):
+                diagnostics.openrouter_response_shape = shape
             reported_model = diagnostics.openrouter_routed_model or self.config.model_id
         except OpenRouterError as exc:
             stage = exc.failure_stage or "unknown"
@@ -750,6 +963,8 @@ class OpenRouterTemporalReasoner:
                         "openrouter_error_type": type(exc).__name__,
                         "openrouter_error_message": sanitize_openrouter_error_message(exc),
                         "openrouter_http_status": exc.status_code,
+                        "openrouter_routed_model": diagnostics.openrouter_routed_model,
+                        "openrouter_response_shape": diagnostics.openrouter_response_shape,
                         "provider": "openrouter",
                         "reasoner_configured": True,
                     },
@@ -969,15 +1184,44 @@ class OpenRouterTemporalReasoner:
                     api_url=self.config.openrouter_api_url,
                     timeout_seconds=self.config.openrouter_timeout_seconds,
                 )
-                content = extract_message_content(response)
-                usage = response.get("usage") if isinstance(response.get("usage"), dict) else {}
+                # HTTP succeeded (2xx). Capture shape/routed model BEFORE content extract
+                # so response_parse failures retain that metadata.
+                shape = summarize_openrouter_response_shape(response, http_status=200)
+                usage = (
+                    response.get("usage")
+                    if isinstance(response.get("usage"), dict)
+                    else {}
+                )
                 routed = extract_routed_model(response)
+                try:
+                    content = extract_message_content(response)
+                except OpenRouterError as parse_exc:
+                    # Preserve HTTP success + structural metadata on content-shape failure.
+                    # Application parse failure does NOT trigger OpenRouter models fallback.
+                    shape_err = (
+                        parse_exc.response_shape
+                        if isinstance(parse_exc.response_shape, dict)
+                        else shape
+                    )
+                    if isinstance(shape_err, dict) and shape_err.get("http_status") is None:
+                        shape_err = {**shape_err, "http_status": 200}
+                    raise OpenRouterError(
+                        str(parse_exc),
+                        status_code=200,
+                        retryable=False,
+                        error_kind=parse_exc.error_kind,
+                        retry_attempted=retry_attempted,
+                        failure_stage=parse_exc.failure_stage or "response_parse",
+                        response_body_preview=parse_exc.response_body_preview,
+                        response_shape=shape_err,
+                    ) from parse_exc
                 return content, {
                     "http_status": 200,
                     "retry_attempted": retry_attempted,
                     "generation_seconds": time.perf_counter() - started,
                     "usage": usage,
                     "routed_model": routed,
+                    "response_shape": shape,
                 }
             except OpenRouterError as exc:
                 can_retry = (
@@ -1000,6 +1244,7 @@ class OpenRouterTemporalReasoner:
                         retry_attempted=retry_attempted,
                         failure_stage=exc.failure_stage,
                         response_body_preview=exc.response_body_preview,
+                        response_shape=exc.response_shape,
                     ) from exc
                 attempt += 1
                 retry_attempted = True

@@ -657,6 +657,14 @@ class TemporalReasonerDiagnostics(BaseModel):
             "selects an underlying model. Never invented."
         ),
     )
+    openrouter_response_shape: Optional[dict[str, Any]] = Field(
+        default=None,
+        description=(
+            "Safe Chat Completions response-shape metadata only "
+            "(keys, finish_reason, content_present, reasoning_present lengths, "
+            "usage token counts). Never stores content, prompts, or reasoning text."
+        ),
+    )
 
 
 class DeterministicTemporalContext(BaseModel):

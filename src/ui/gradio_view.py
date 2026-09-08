@@ -352,6 +352,51 @@ def render_technical_details(routed: Any) -> str:
                         lines.append(
                             f"**OpenRouter routed model:** `{reasoner_diag.openrouter_routed_model}`"
                         )
+                    shape = reasoner_diag.openrouter_response_shape
+                    if isinstance(shape, dict) and shape:
+                        fr = shape.get("finish_reason")
+                        if isinstance(fr, str) and fr.strip():
+                            lines.append(f"**OpenRouter finish_reason:** `{fr.strip()}`")
+                        lines.append(
+                            "**OpenRouter content present:** "
+                            f"`{bool(shape.get('content_present'))}` "
+                            f"(type=`{shape.get('content_type')}`"
+                            + (
+                                f", length={shape.get('content_length')}"
+                                if shape.get("content_length") is not None
+                                else ""
+                            )
+                            + ")"
+                        )
+                        lines.append(
+                            "**OpenRouter reasoning present:** "
+                            f"`{bool(shape.get('reasoning_present'))}`"
+                            + (
+                                f" (length={shape.get('reasoning_length')})"
+                                if shape.get("reasoning_length") is not None
+                                else ""
+                            )
+                        )
+                        if shape.get("reasoning_details_present"):
+                            lines.append(
+                                "**OpenRouter reasoning_details:** "
+                                f"present=`True` count=`{shape.get('reasoning_details_count')}`"
+                            )
+                        usage = shape.get("usage") if isinstance(shape.get("usage"), dict) else {}
+                        if usage:
+                            usage_bits = []
+                            for key in (
+                                "prompt_tokens",
+                                "completion_tokens",
+                                "total_tokens",
+                                "reasoning_tokens",
+                            ):
+                                if usage.get(key) is not None:
+                                    usage_bits.append(f"{key}={usage[key]}")
+                            if usage_bits:
+                                lines.append(
+                                    "**OpenRouter usage:** `" + ", ".join(usage_bits) + "`"
+                                )
                 if reasoning is not None and reasoner_diag.provider == "openrouter":
                     http_disp = (
                         reasoner_diag.openrouter_http_status

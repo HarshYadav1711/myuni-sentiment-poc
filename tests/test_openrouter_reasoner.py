@@ -48,8 +48,10 @@ from src.temporal.providers.openrouter import (
     build_openrouter_model_chain,
     build_openrouter_request_body,
     extract_message_content,
+    format_missing_content_error,
     openrouter_api_key_configured,
     post_openrouter_chat_completion,
+    summarize_openrouter_response_shape,
 )
 from src.temporal.providers.openrouter_schema import (
     OPENROUTER_SYSTEM_INSTRUCTION,
@@ -874,6 +876,285 @@ def test_missing_content(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(OpenRouterError) as ei:
         extract_message_content({"choices": [{"message": {}}]})
     assert ei.value.error_kind == "missing_content"
+    assert "missing_content:" in str(ei.value)
+    assert ei.value.response_shape is not None
+    assert ei.value.response_shape.get("content_type") == "null"
+
+
+# ---------------------------------------------------------------------------
+# Response-shape diagnostics (no live OpenRouter)
+# ---------------------------------------------------------------------------
+
+
+def _choice_response(
+    *,
+    content: object = None,
+    finish_reason: str = "stop",
+    model: str = "minimax/minimax-m3:free",
+    reasoning: object = None,
+    reasoning_content: object = None,
+    reasoning_details: object = None,
+    usage: dict | None = None,
+    native_finish_reason: str | None = None,
+    response_id: str = "gen-abc123def456xyz",
+) -> dict:
+    message: dict = {"role": "assistant", "content": content}
+    if reasoning is not None:
+        message["reasoning"] = reasoning
+    if reasoning_content is not None:
+        message["reasoning_content"] = reasoning_content
+    if reasoning_details is not None:
+        message["reasoning_details"] = reasoning_details
+    choice: dict = {"message": message, "finish_reason": finish_reason}
+    if native_finish_reason is not None:
+        choice["native_finish_reason"] = native_finish_reason
+    payload: dict = {
+        "id": response_id,
+        "model": model,
+        "choices": [choice],
+    }
+    if usage is not None:
+        payload["usage"] = usage
+    return payload
+
+
+def test_response_shape_normal_content_string() -> None:
+    payload = _choice_response(content='{"summary":"ok","context_type":"stable"}')
+    text = extract_message_content(payload)
+    assert "summary" in text
+    shape = summarize_openrouter_response_shape(payload, http_status=200)
+    assert shape["content_present"] is True
+    assert shape["content_type"] == "str"
+    assert shape["content_length"] == len(payload["choices"][0]["message"]["content"])
+    assert shape["reasoning_present"] is False
+    assert shape["http_status"] == 200
+    assert shape["routed_model"] == "minimax/minimax-m3:free"
+    assert shape["finish_reason"] == "stop"
+    assert shape["response_id_prefix"] == "gen-abc123def456"
+    # Never leaks content text into shape.
+    dumped = json.dumps(shape)
+    assert "summary" not in dumped
+
+
+def test_response_shape_null_content_reasoning_length() -> None:
+    secret_reasoning = "SECRET_CHAIN_OF_THOUGHT_DO_NOT_LEAK"
+    payload = _choice_response(
+        content=None,
+        finish_reason="length",
+        reasoning=secret_reasoning,
+        usage={
+            "prompt_tokens": 120,
+            "completion_tokens": 768,
+            "total_tokens": 888,
+            "completion_tokens_details": {"reasoning_tokens": 760},
+        },
+    )
+    with pytest.raises(OpenRouterError) as ei:
+        extract_message_content(payload)
+    err = ei.value
+    assert err.error_kind == "missing_content"
+    msg = str(err)
+    assert "missing_content:" in msg
+    assert "finish_reason=length" in msg
+    assert "reasoning_present=True" in msg
+    assert "completion_tokens=768" in msg
+    assert "reasoning_tokens=760" in msg
+    assert secret_reasoning not in msg
+    assert err.response_shape is not None
+    assert err.response_shape["content_type"] == "null"
+    assert err.response_shape["content_present"] is False
+    assert err.response_shape["reasoning_present"] is True
+    assert err.response_shape["reasoning_length"] == len(secret_reasoning)
+    assert secret_reasoning not in json.dumps(err.response_shape)
+
+
+def test_response_shape_null_content_no_reasoning() -> None:
+    payload = _choice_response(content=None, finish_reason="stop")
+    with pytest.raises(OpenRouterError) as ei:
+        extract_message_content(payload)
+    msg = str(ei.value)
+    assert "missing_content:" in msg
+    assert "finish_reason=stop" in msg
+    assert "reasoning_present=False" in msg
+
+
+def test_response_shape_empty_content_string() -> None:
+    payload = _choice_response(content="   ", finish_reason="stop")
+    with pytest.raises(OpenRouterError) as ei:
+        extract_message_content(payload)
+    assert "empty_content:" in str(ei.value)
+    assert ei.value.response_shape is not None
+    assert ei.value.response_shape["content_type"] == "str"
+    assert ei.value.response_shape["content_present"] is False
+
+
+def test_response_shape_content_list_text_parts() -> None:
+    payload = _choice_response(
+        content=[
+            {"type": "text", "text": '{"summary":"from-list"'},
+            {"type": "text", "text": ',"context_type":"stable"}'},
+        ]
+    )
+    text = extract_message_content(payload)
+    assert "from-list" in text
+    shape = summarize_openrouter_response_shape(payload)
+    assert shape["content_type"] == "list"
+    assert shape["content_present"] is True
+    assert shape["content_length"] == len(text)  # joined without strip differences... wait
+    # extract strips; length meta is pre-strip join of parts
+    assert shape["content_length"] is not None and shape["content_length"] > 0
+
+
+def test_response_shape_reasoning_details_with_valid_content() -> None:
+    secret = "HIDDEN_REASONING_DETAIL_PAYLOAD"
+    payload = _choice_response(
+        content='{"summary":"ok","context_type":"stable","confidence":0.5}',
+        reasoning_details=[{"type": "reasoning.text", "text": secret}],
+    )
+    text = extract_message_content(payload)
+    assert "summary" in text
+    shape = summarize_openrouter_response_shape(payload)
+    assert shape["content_present"] is True
+    assert shape["reasoning_details_present"] is True
+    assert shape["reasoning_details_count"] == 1
+    assert shape["reasoning_present"] is True
+    assert secret not in json.dumps(shape)
+    # Must NOT use reasoning_details as the answer.
+    assert secret not in text
+
+
+def test_response_shape_usage_reasoning_tokens() -> None:
+    payload = _choice_response(
+        content='{"summary":"ok"}',
+        usage={
+            "prompt_tokens": 10,
+            "completion_tokens": 40,
+            "total_tokens": 50,
+            "completion_tokens_details": {"reasoning_tokens": 12},
+        },
+    )
+    shape = summarize_openrouter_response_shape(payload)
+    assert shape["usage"] == {
+        "prompt_tokens": 10,
+        "completion_tokens": 40,
+        "total_tokens": 50,
+        "reasoning_tokens": 12,
+    }
+
+
+def test_response_shape_no_secret_or_reasoning_leak_in_diagnostics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-LIVE-SECRET-SHOULD-NOT-APPEAR")
+    secret_reasoning = "PRIVATE_REASONING_SHOULD_NOT_APPEAR"
+    payload = _choice_response(
+        content=None,
+        finish_reason="length",
+        model="minimax/minimax-m3:free",
+        reasoning=secret_reasoning,
+        usage={
+            "prompt_tokens": 11,
+            "completion_tokens": 768,
+            "completion_tokens_details": {"reasoning_tokens": 700},
+        },
+    )
+    reasoner = OpenRouterTemporalReasoner(_openrouter_cfg())
+
+    def fake_post(*_a, **_k):  # noqa: ANN001
+        return payload
+
+    monkeypatch.setattr(
+        "src.temporal.providers.openrouter.post_openrouter_chat_completion",
+        fake_post,
+    )
+    result, diag = reasoner.reason(fixture_stable_neutral())
+    assert result.status == "generation_failed"
+    assert result.context_type == "uncertain"
+    blob = json.dumps(
+        {
+            "error": diag.openrouter_error_message,
+            "shape": diag.openrouter_response_shape,
+            "details": result.details,
+            "preview": diag.openrouter_response_preview,
+            "kwargs": diag.generation_kwargs,
+        }
+    )
+    assert "sk-LIVE-SECRET" not in blob
+    assert secret_reasoning not in blob
+    assert "PRIVATE_REASONING" not in blob
+    assert "Bearer " not in blob
+
+
+def test_response_shape_failure_retains_routed_model_and_http_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k")
+    payload = _choice_response(
+        content=None,
+        finish_reason="length",
+        model="minimax/minimax-m3:free",
+        reasoning="x" * 50,
+        usage={"completion_tokens": 768, "completion_tokens_details": {"reasoning_tokens": 768}},
+    )
+    reasoner = OpenRouterTemporalReasoner(_openrouter_cfg())
+    monkeypatch.setattr(
+        "src.temporal.providers.openrouter.post_openrouter_chat_completion",
+        lambda *_a, **_k: payload,
+    )
+    result, diag = reasoner.reason(fixture_stable_neutral())
+    assert result.status == "generation_failed"
+    assert diag.openrouter_failure_stage == "response_parse"
+    assert diag.openrouter_http_status == 200
+    assert diag.http_status == 200
+    assert diag.openrouter_routed_model == "minimax/minimax-m3:free"
+    assert diag.openrouter_response_shape is not None
+    assert diag.openrouter_response_shape["http_status"] == 200
+    assert diag.openrouter_response_shape["finish_reason"] == "length"
+    assert diag.output_hit_token_limit is True
+    assert diag.likely_output_truncation is True
+    assert result.details.get("openrouter_http_status") == 200
+    assert result.details.get("openrouter_routed_model") == "minimax/minimax-m3:free"
+
+
+def test_format_missing_content_error_helpers() -> None:
+    shape = {
+        "routed_model": "liquid/lfm-2.5-2.6b:free",
+        "finish_reason": "stop",
+        "content_type": "null",
+        "content_present": False,
+        "reasoning_present": False,
+        "reasoning_details_present": False,
+        "usage": {"completion_tokens": 0},
+    }
+    msg = format_missing_content_error(shape)
+    assert msg.startswith("missing_content:")
+    assert "model=liquid/lfm-2.5-2.6b:free" in msg
+    assert "reasoning_present=False" in msg
+
+
+def test_failsoft_uncertain_on_missing_content_shape_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k")
+    ctx = fixture_persistent_negative()
+    reasoner = OpenRouterTemporalReasoner(_openrouter_cfg())
+    monkeypatch.setattr(
+        "src.temporal.providers.openrouter.post_openrouter_chat_completion",
+        lambda *_a, **_k: _choice_response(content=None, finish_reason="length"),
+    )
+    result, _diag = reasoner.reason(ctx)
+    assert result.status == "generation_failed"
+    assert result.context_type == "uncertain"
+    final = build_final_temporal_assessment(
+        ctx, result, model_id=OPENROUTER_REASONER_MODEL
+    )
+    assert final.status == "explanation_unavailable"
+    assert final.context_type == "uncertain"
+    assert final.overall_wellbeing_indicator == "insufficient_evidence"
+    assert (
+        compute_wellbeing_indicator(ctx, context_type="uncertain")
+        == "insufficient_evidence"
+    )
 
 
 def test_free_endpoint_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
