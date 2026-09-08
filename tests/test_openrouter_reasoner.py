@@ -165,21 +165,21 @@ def _fake_http_response(payload: dict, *, status: int = 200) -> SimpleNamespace:
 EXPECTED_OPENROUTER_MODEL_CHAIN = [
     "minimax/minimax-m3:free",
     "liquid/lfm-2.5-2.6b:free",
-    "minimax/minimax-m2.7:free",
+    "google/gemma-4-26b-a4b-it:free",
 ]
 
 
 def test_openrouter_model_id_default() -> None:
     assert OPENROUTER_REASONER_MODEL == "minimax/minimax-m3:free"
     assert OPENROUTER_REASONER_FALLBACK_MODELS == (
-        "liquid/lfm-2.5-2.6b:free,minimax/minimax-m2.7:free"
+        "liquid/lfm-2.5-2.6b:free,google/gemma-4-26b-a4b-it:free"
     )
     cfg = resolve_temporal_reasoner_config()
     assert cfg.provider == "openrouter"
     assert cfg.model_id == "minimax/minimax-m3:free"
     assert cfg.openrouter_fallback_models == [
         "liquid/lfm-2.5-2.6b:free",
-        "minimax/minimax-m2.7:free",
+        "google/gemma-4-26b-a4b-it:free",
     ]
     assert cfg.fallback == "none"
     assert "gpt-oss" not in cfg.model_id
@@ -192,11 +192,15 @@ def test_openrouter_model_id_default() -> None:
     for mid in chain:
         assert mid.endswith(":free")
         assert "gpt-oss" not in mid
-        assert "gemma" not in mid.lower()
         assert "nex-agi" not in mid.lower()
         assert "dots-studio" not in mid.lower()
+        assert "minimax-m2.7" not in mid
+        assert mid != "minimax/minimax-m2.7"
+    assert chain[-1] == "google/gemma-4-26b-a4b-it:free"
     assert "gemma" not in OPENROUTER_REASONER_MODEL.lower()
-    assert "gemma" not in OPENROUTER_REASONER_FALLBACK_MODELS.lower()
+    assert "google/gemma-4-26b-a4b-it:free" in OPENROUTER_REASONER_FALLBACK_MODELS
+    assert "minimax-m2.7" not in OPENROUTER_REASONER_FALLBACK_MODELS
+    assert "minimax/minimax-m2.7" not in OPENROUTER_REASONER_FALLBACK_MODELS
     assert "nex-agi" not in OPENROUTER_REASONER_MODEL.lower()
     assert "nex-agi" not in OPENROUTER_REASONER_FALLBACK_MODELS.lower()
 
@@ -235,7 +239,7 @@ def test_openrouter_model_chain_deduplicates() -> None:
             "minimax/minimax-m3:free",
             "liquid/lfm-2.5-2.6b:free",
             "liquid/lfm-2.5-2.6b:free",
-            "minimax/minimax-m2.7:free",
+            "google/gemma-4-26b-a4b-it:free",
         ],
     ) == EXPECTED_OPENROUTER_MODEL_CHAIN
 
@@ -269,7 +273,7 @@ def test_openrouter_request_shape_and_auth_header(monkeypatch: pytest.MonkeyPatc
         max_tokens=OPENROUTER_REASONER_MAX_TOKENS,
         fallback_models=[
             "liquid/lfm-2.5-2.6b:free",
-            "minimax/minimax-m2.7:free",
+            "google/gemma-4-26b-a4b-it:free",
         ],
     )
     assert "model" not in body
@@ -436,7 +440,7 @@ def test_routed_model_recorded_when_returned(monkeypatch: pytest.MonkeyPatch) ->
     )
     assert (diag.generation_kwargs or {}).get("fallback_models") == [
         "liquid/lfm-2.5-2.6b:free",
-        "minimax/minimax-m2.7:free",
+        "google/gemma-4-26b-a4b-it:free",
     ]
     assert (diag.generation_kwargs or {}).get("model_chain") == (
         EXPECTED_OPENROUTER_MODEL_CHAIN
@@ -561,7 +565,7 @@ def test_no_paid_gpt_oss_fallback_in_defaults() -> None:
     assert cfg.model_id != "openrouter/free"
     assert cfg.openrouter_fallback_models == [
         "liquid/lfm-2.5-2.6b:free",
-        "minimax/minimax-m2.7:free",
+        "google/gemma-4-26b-a4b-it:free",
     ]
     body = build_openrouter_request_body(
         model_id=cfg.model_id,
@@ -579,7 +583,8 @@ def test_no_paid_gpt_oss_fallback_in_defaults() -> None:
     assert "gpt-oss" not in joined
     assert "openrouter/free" not in joined
     assert "nex-agi" not in joined
-    assert "gemma" not in joined
+    assert "minimax/minimax-m2.7" not in joined
+    assert "google/gemma-4-26b-a4b-it:free" in joined
 
 
 def test_missing_key_fail_soft(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1162,7 +1167,7 @@ def test_failsoft_uncertain_on_missing_content_shape_failure(
         lambda *_a, **_k: _choice_response(
             content=None,
             finish_reason="length",
-            model="minimax/minimax-m2.7:free",
+            model="google/gemma-4-26b-a4b-it:free",
         ),
     )
     result, diag = reasoner.reason(ctx)
@@ -1170,7 +1175,7 @@ def test_failsoft_uncertain_on_missing_content_shape_failure(
     assert result.context_type == "uncertain"
     # Last remaining model fails → no further app fallback.
     assert diag.openrouter_application_fallback_attempted is True or (
-        diag.openrouter_routed_model == "minimax/minimax-m2.7:free"
+        diag.openrouter_routed_model == "google/gemma-4-26b-a4b-it:free"
     )
     final = build_final_temporal_assessment(
         ctx, result, model_id=OPENROUTER_REASONER_MODEL
@@ -1193,20 +1198,23 @@ def test_remaining_models_after_routed_helpers() -> None:
     chain = EXPECTED_OPENROUTER_MODEL_CHAIN
     assert remaining_models_after_routed(chain, "minimax/minimax-m3:free") == [
         "liquid/lfm-2.5-2.6b:free",
-        "minimax/minimax-m2.7:free",
+        "google/gemma-4-26b-a4b-it:free",
     ]
     assert remaining_models_after_routed(chain, "liquid/lfm-2.5-2.6b:free") == [
-        "minimax/minimax-m2.7:free",
+        "google/gemma-4-26b-a4b-it:free",
     ]
-    assert remaining_models_after_routed(chain, "minimax/minimax-m2.7:free") == []
+    assert remaining_models_after_routed(chain, "google/gemma-4-26b-a4b-it:free") == []
     assert remaining_models_after_routed(chain, None) == [
         "liquid/lfm-2.5-2.6b:free",
-        "minimax/minimax-m2.7:free",
+        "google/gemma-4-26b-a4b-it:free",
     ]
     # Never cycle backward.
-    assert "minimax/minimax-m3:free" not in remaining_models_after_routed(
-        chain, "liquid/lfm-2.5-2.6b:free"
-    )
+    after_liquid = remaining_models_after_routed(chain, "liquid/lfm-2.5-2.6b:free")
+    assert after_liquid == ["google/gemma-4-26b-a4b-it:free"]
+    assert "minimax/minimax-m3:free" not in after_liquid
+    assert "liquid/lfm-2.5-2.6b:free" not in after_liquid
+    assert "minimax/minimax-m2.7" not in after_liquid
+    assert "minimax/minimax-m2.7:free" not in after_liquid
 
 
 def test_valid_first_response_skips_application_fallback(
@@ -1260,7 +1268,7 @@ def test_null_content_from_primary_falls_back_to_remaining_models(
             )
         assert body["models"] == [
             "liquid/lfm-2.5-2.6b:free",
-            "minimax/minimax-m2.7:free",
+            "google/gemma-4-26b-a4b-it:free",
         ]
         assert "minimax/minimax-m3:free" not in body["models"]
         return _choice_response(content=raw, model="liquid/lfm-2.5-2.6b:free")
@@ -1277,14 +1285,14 @@ def test_null_content_from_primary_falls_back_to_remaining_models(
     assert diag.openrouter_application_fallback_from_model == "minimax/minimax-m3:free"
     assert diag.openrouter_application_fallback_remaining_models == [
         "liquid/lfm-2.5-2.6b:free",
-        "minimax/minimax-m2.7:free",
+        "google/gemma-4-26b-a4b-it:free",
     ]
     assert diag.openrouter_attempt_count == 2
     blob = json.dumps(diag.model_dump())
     assert "SECRET_REASONING_A" not in blob
 
 
-def test_liquid_null_content_falls_back_only_to_m27(
+def test_liquid_null_content_falls_back_only_to_gemma(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("OPENROUTER_API_KEY", "k")
@@ -1296,23 +1304,28 @@ def test_liquid_null_content_falls_back_only_to_m27(
 
     def fake_post(body, *, api_key, api_url, timeout_seconds):  # noqa: ANN001
         calls.append(list(body["models"]))
+        assert body["reasoning"]["effort"] == "minimal"
+        assert body["reasoning"]["exclude"] is True
+        assert body["max_tokens"] == 1280
         if len(calls) == 1:
             # Server-side chain landed on Liquid with null content (live case).
             return _choice_response(
                 content=None,
                 finish_reason="length",
                 model="liquid/lfm-2.5-2.6b:free",
-                reasoning="x" * 100,
+                reasoning="SECRET_REASONING_LIQUID",
                 usage={
                     "prompt_tokens": 4105,
                     "completion_tokens": 768,
                     "completion_tokens_details": {"reasoning_tokens": 768},
                 },
             )
-        assert body["models"] == ["minimax/minimax-m2.7:free"]
+        assert body["models"] == ["google/gemma-4-26b-a4b-it:free"]
         assert "liquid/lfm-2.5-2.6b:free" not in body["models"]
         assert "minimax/minimax-m3:free" not in body["models"]
-        return _choice_response(content=raw, model="minimax/minimax-m2.7:free")
+        assert "minimax/minimax-m2.7" not in body["models"]
+        assert "minimax/minimax-m2.7:free" not in body["models"]
+        return _choice_response(content=raw, model="google/gemma-4-26b-a4b-it:free")
 
     monkeypatch.setattr(
         "src.temporal.providers.openrouter.post_openrouter_chat_completion",
@@ -1320,12 +1333,16 @@ def test_liquid_null_content_falls_back_only_to_m27(
     )
     result, diag = reasoner.reason(ctx)
     assert result.status == "ok"
-    assert result.model == "minimax/minimax-m2.7:free"
+    assert result.model == "google/gemma-4-26b-a4b-it:free"
     assert diag.openrouter_application_fallback_from_model == "liquid/lfm-2.5-2.6b:free"
     assert diag.openrouter_application_fallback_remaining_models == [
-        "minimax/minimax-m2.7:free"
+        "google/gemma-4-26b-a4b-it:free"
     ]
     assert len(calls) == 2
+    assert diag.openrouter_attempt_count <= OPENROUTER_MAX_HTTP_REQUESTS_PER_CALL
+    blob = json.dumps(diag.model_dump()) + json.dumps(result.model_dump())
+    assert "SECRET_REASONING_LIQUID" not in blob
+    assert "minimax/minimax-m2.7" not in blob
 
 
 def test_empty_content_triggers_application_fallback(
@@ -1381,8 +1398,12 @@ def test_all_application_fallback_models_fail_soft(
     assert result.context_type == "uncertain"
     assert len(calls) == 2
     assert calls[0] == EXPECTED_OPENROUTER_MODEL_CHAIN
-    # First response routes to primary → remaining is liquid+m2.7 as one request.
+    # First response routes to primary → remaining is liquid+gemma as one request.
     assert calls[1][0] == "liquid/lfm-2.5-2.6b:free"
+    assert calls[1] == [
+        "liquid/lfm-2.5-2.6b:free",
+        "google/gemma-4-26b-a4b-it:free",
+    ]
     assert diag.openrouter_attempt_count <= OPENROUTER_MAX_HTTP_REQUESTS_PER_CALL
     assert "NO_LEAK" not in json.dumps(diag.model_dump())
     final = build_final_temporal_assessment(ctx, result, model_id=OPENROUTER_REASONER_MODEL)
@@ -1409,11 +1430,17 @@ def test_no_retry_of_model_that_already_returned_unusable_2xx(
         "src.temporal.providers.openrouter.post_openrouter_chat_completion",
         fake_post,
     )
-    reasoner.reason(fixture_stable_neutral())
+    result, diag = reasoner.reason(fixture_stable_neutral())
     # Liquid appeared in first chain response as routed; must not be requested again.
-    # Second request should be only m2.7.
+    # Second request should be only Gemma; Gemma failure remains fail-soft.
     assert seen_models.count("liquid/lfm-2.5-2.6b:free") == 1
-    assert seen_models[-1] == "minimax/minimax-m2.7:free"
+    assert seen_models.count("minimax/minimax-m3:free") == 1
+    assert seen_models[-1] == "google/gemma-4-26b-a4b-it:free"
+    assert "minimax/minimax-m2.7" not in seen_models
+    assert result.status == "generation_failed"
+    assert result.context_type == "uncertain"
+    assert diag.openrouter_attempt_count <= OPENROUTER_MAX_HTTP_REQUESTS_PER_CALL
+    assert diag.openrouter_attempt_count == 2
 
 
 def test_auth_failure_does_not_trigger_application_fallback(
@@ -1967,7 +1994,7 @@ def test_request_payload_json_serializable_real_fixture() -> None:
         max_tokens=OPENROUTER_REASONER_MAX_TOKENS,
         fallback_models=[
             "liquid/lfm-2.5-2.6b:free",
-            "minimax/minimax-m2.7:free",
+            "google/gemma-4-26b-a4b-it:free",
         ],
     )
     raw = assert_json_serializable(body)

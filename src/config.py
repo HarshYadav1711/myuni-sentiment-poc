@@ -107,7 +107,7 @@ OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
 OPENROUTER_REASONER_MODEL = "minimax/minimax-m3:free"
 # Comma-separated OpenRouter free-model fallbacks (raw REST ``models`` chain).
 OPENROUTER_REASONER_FALLBACK_MODELS = (
-    "liquid/lfm-2.5-2.6b:free,minimax/minimax-m2.7:free"
+    "liquid/lfm-2.5-2.6b:free,google/gemma-4-26b-a4b-it:free"
 )
 OPENROUTER_TIMEOUT_SECONDS = 60.0
 # At most one bounded retry for transient 429/5xx (plus the initial attempt).
@@ -345,7 +345,7 @@ def resolve_temporal_reasoner_config(
     - ``TEMPORAL_REASONER_PROVIDER`` (default openrouter)
     - ``TEMPORAL_REASONER_FALLBACK`` (default none)
     - ``OPENROUTER_REASONER_MODEL`` (default minimax/minimax-m3:free)
-    - ``OPENROUTER_REASONER_FALLBACK_MODELS`` (default liquid/lfm-2.5-2.6b:free,minimax/minimax-m2.7:free)
+    - ``OPENROUTER_REASONER_FALLBACK_MODELS`` (default liquid/lfm-2.5-2.6b:free,google/gemma-4-26b-a4b-it:free)
     - ``OPENROUTER_API_KEY`` is read at request time, not stored on this object
     """
     provider = (

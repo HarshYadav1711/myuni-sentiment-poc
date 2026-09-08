@@ -130,13 +130,14 @@ def test_openrouter_defaults_in_bundle(deploy_ready: Path) -> None:
     assert 'OPENROUTER_REASONER_MODEL = "minimax/minimax-m3:free"' in cfg
     assert (
         'OPENROUTER_REASONER_FALLBACK_MODELS = (\n'
-        '    "liquid/lfm-2.5-2.6b:free,minimax/minimax-m2.7:free"\n'
+        '    "liquid/lfm-2.5-2.6b:free,google/gemma-4-26b-a4b-it:free"\n'
         ')'
     ) in cfg or (
         'OPENROUTER_REASONER_FALLBACK_MODELS = '
-        '"liquid/lfm-2.5-2.6b:free,minimax/minimax-m2.7:free"'
+        '"liquid/lfm-2.5-2.6b:free,google/gemma-4-26b-a4b-it:free"'
     ) in cfg
-    assert "gemma" not in cfg.lower()
+    assert "google/gemma-4-26b-a4b-it:free" in cfg
+    assert "minimax/minimax-m2.7" not in cfg
     assert "nex-agi" not in cfg.lower()
     assert "openai/gpt-oss-20b:free" not in cfg
     assert 'OPENROUTER_REASONER_MODEL = "openrouter/free"' not in cfg
@@ -195,12 +196,12 @@ def test_qwen_not_default_provider(deploy_ready: Path) -> None:
         "assert TEMPORAL_REASONER_FALLBACK == 'none'\n"
         "assert OPENROUTER_REASONER_MODEL == 'minimax/minimax-m3:free'\n"
         "assert OPENROUTER_REASONER_FALLBACK_MODELS.replace(' ', '') == "
-        "'liquid/lfm-2.5-2.6b:free,minimax/minimax-m2.7:free'\n"
+        "'liquid/lfm-2.5-2.6b:free,google/gemma-4-26b-a4b-it:free'\n"
         "cfg = resolve_temporal_reasoner_config()\n"
         "assert cfg.provider == 'openrouter'\n"
         "assert cfg.fallback == 'none'\n"
         "assert cfg.openrouter_fallback_models == "
-        "['liquid/lfm-2.5-2.6b:free', 'minimax/minimax-m2.7:free']\n"
+        "['liquid/lfm-2.5-2.6b:free', 'google/gemma-4-26b-a4b-it:free']\n"
         "print('ok')\n"
     )
     proc = subprocess.run(
