@@ -113,6 +113,11 @@ OPENROUTER_TIMEOUT_SECONDS = 60.0
 # At most one bounded retry for transient 429/5xx (plus the initial attempt).
 OPENROUTER_MAX_TRANSIENT_RETRIES = 1
 OPENROUTER_MAX_RETRY_AFTER_SECONDS = 5.0
+# OpenRouter production completion budget (reasoner JSON). Separate from Qwen.
+OPENROUTER_REASONER_MAX_TOKENS = 1280
+# Hard cap on HTTP POSTs inside one OpenRouterTemporalReasoner.reason() call:
+# 1 primary chain + 1 transient retry + 1 app-level fallback + 1 schema repair.
+OPENROUTER_MAX_HTTP_REQUESTS_PER_CALL = 4
 
 # Local / ZeroGPU Qwen (benchmark + optional provider). Preserved; not demo default.
 TEMPORAL_REASONER_QWEN_MODEL = "Qwen/Qwen3-1.7B"
@@ -120,7 +125,7 @@ TEMPORAL_REASONER_MODEL = OPENROUTER_REASONER_MODEL
 # Explicit device only — never inferred from torch.cuda.is_available() (ZeroGPU).
 TEMPORAL_REASONER_DEVICE = "cpu"
 TEMPORAL_REASONER_MAX_NEW_TOKENS = 768
-# Benchmark / evaluation profile only (Phase 3B). Production greedy default stays 768.
+# Benchmark / evaluation profile only (Phase 3B). Qwen path stays independent of OpenRouter.
 TEMPORAL_REASONER_EVAL_MAX_NEW_TOKENS = 1024
 TEMPORAL_REASONER_TEMPERATURE = 0.0
 TEMPORAL_REASONER_TOP_P = 1.0
@@ -373,6 +378,11 @@ def resolve_temporal_reasoner_config(
         "qwen_model_id": TEMPORAL_REASONER_QWEN_MODEL,
         "openrouter_fallback_models": openrouter_fallback_models,
     }
+    # Keep OpenRouter and Qwen token budgets independent.
+    if provider == "openrouter":
+        kwargs["max_new_tokens"] = OPENROUTER_REASONER_MAX_TOKENS
+    else:
+        kwargs["max_new_tokens"] = TEMPORAL_REASONER_MAX_NEW_TOKENS
     if overrides:
         kwargs.update(dict(overrides))
     return TemporalReasonerConfig(**kwargs)
@@ -485,4 +495,6 @@ def load_fusion_config(path: Optional[Path] = None) -> FusionConfig:
 DEFAULT_FUSION = load_fusion_config()
 DEFAULT_VIDEO_SAMPLING = VideoSamplingConfig()
 DEFAULT_TEMPORAL = TemporalConfig()
-DEFAULT_TEMPORAL_REASONER = TemporalReasonerConfig()
+DEFAULT_TEMPORAL_REASONER = TemporalReasonerConfig(
+    max_new_tokens=OPENROUTER_REASONER_MAX_TOKENS,
+)

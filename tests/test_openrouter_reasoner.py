@@ -19,8 +19,12 @@ for path in (ROOT, TESTS):
 
 from src.config import (
     OPENROUTER_API_URL,
+    OPENROUTER_MAX_HTTP_REQUESTS_PER_CALL,
     OPENROUTER_REASONER_FALLBACK_MODELS,
+    OPENROUTER_REASONER_MAX_TOKENS,
     OPENROUTER_REASONER_MODEL,
+    TEMPORAL_REASONER_EVAL_MAX_NEW_TOKENS,
+    TEMPORAL_REASONER_MAX_NEW_TOKENS,
     TemporalReasonerConfig,
     evaluation_reasoner_config,
     parse_openrouter_fallback_models,
@@ -49,8 +53,10 @@ from src.temporal.providers.openrouter import (
     build_openrouter_request_body,
     extract_message_content,
     format_missing_content_error,
+    is_application_fallback_eligible,
     openrouter_api_key_configured,
     post_openrouter_chat_completion,
+    remaining_models_after_routed,
     summarize_openrouter_response_shape,
 )
 from src.temporal.providers.openrouter_schema import (
@@ -124,6 +130,7 @@ def _openrouter_cfg(**kwargs: object) -> TemporalReasonerConfig:
         "provider": "openrouter",
         "fallback": "none",
         "model_id": OPENROUTER_REASONER_MODEL,
+        "max_new_tokens": OPENROUTER_REASONER_MAX_TOKENS,
         "openrouter_max_transient_retries": 1,
         "openrouter_timeout_seconds": 5.0,
     }
@@ -259,7 +266,7 @@ def test_openrouter_request_shape_and_auth_header(monkeypatch: pytest.MonkeyPatc
         model_id=OPENROUTER_REASONER_MODEL,
         system=OPENROUTER_SYSTEM_INSTRUCTION,
         user="hello",
-        max_tokens=768,
+        max_tokens=OPENROUTER_REASONER_MAX_TOKENS,
         fallback_models=[
             "liquid/lfm-2.5-2.6b:free",
             "minimax/minimax-m2.7:free",
@@ -270,6 +277,15 @@ def test_openrouter_request_shape_and_auth_header(monkeypatch: pytest.MonkeyPatc
     assert body["response_format"]["type"] == "json_object"
     assert "json_schema" not in body["response_format"]
     assert body["provider"]["require_parameters"] is True
+    assert body["max_tokens"] == 1280
+    assert body["reasoning"]["effort"] == "minimal"
+    assert body["reasoning"]["exclude"] is True
+    assert OPENROUTER_REASONER_MAX_TOKENS == 1280
+    assert TEMPORAL_REASONER_MAX_NEW_TOKENS == 768
+    assert TEMPORAL_REASONER_EVAL_MAX_NEW_TOKENS == 1024
+    assert resolve_temporal_reasoner_config().max_new_tokens == 1280
+    assert evaluation_reasoner_config().max_new_tokens == 1024
+    assert OPENROUTER_MAX_HTTP_REQUESTS_PER_CALL == 4
     assert set(OPENROUTER_TEMPORAL_REASONING_SCHEMA["required"]) == {
         "summary",
         "trajectory_explanation",
@@ -395,6 +411,9 @@ def test_routed_model_recorded_when_returned(monkeypatch: pytest.MonkeyPatch) ->
         assert "model" not in body
         assert body["models"] == EXPECTED_OPENROUTER_MODEL_CHAIN
         assert body["response_format"]["type"] == "json_object"
+        assert body["max_tokens"] == 1280
+        assert body["reasoning"]["effort"] == "minimal"
+        assert body["reasoning"]["exclude"] is True
         return {
             "id": "gen-1",
             "model": "minimax/minimax-m3:free",
@@ -1140,11 +1159,19 @@ def test_failsoft_uncertain_on_missing_content_shape_failure(
     reasoner = OpenRouterTemporalReasoner(_openrouter_cfg())
     monkeypatch.setattr(
         "src.temporal.providers.openrouter.post_openrouter_chat_completion",
-        lambda *_a, **_k: _choice_response(content=None, finish_reason="length"),
+        lambda *_a, **_k: _choice_response(
+            content=None,
+            finish_reason="length",
+            model="minimax/minimax-m2.7:free",
+        ),
     )
-    result, _diag = reasoner.reason(ctx)
+    result, diag = reasoner.reason(ctx)
     assert result.status == "generation_failed"
     assert result.context_type == "uncertain"
+    # Last remaining model fails → no further app fallback.
+    assert diag.openrouter_application_fallback_attempted is True or (
+        diag.openrouter_routed_model == "minimax/minimax-m2.7:free"
+    )
     final = build_final_temporal_assessment(
         ctx, result, model_id=OPENROUTER_REASONER_MODEL
     )
@@ -1155,6 +1182,317 @@ def test_failsoft_uncertain_on_missing_content_shape_failure(
         compute_wellbeing_indicator(ctx, context_type="uncertain")
         == "insufficient_evidence"
     )
+
+
+# ---------------------------------------------------------------------------
+# Application-level fallback after unusable 2xx
+# ---------------------------------------------------------------------------
+
+
+def test_remaining_models_after_routed_helpers() -> None:
+    chain = EXPECTED_OPENROUTER_MODEL_CHAIN
+    assert remaining_models_after_routed(chain, "minimax/minimax-m3:free") == [
+        "liquid/lfm-2.5-2.6b:free",
+        "minimax/minimax-m2.7:free",
+    ]
+    assert remaining_models_after_routed(chain, "liquid/lfm-2.5-2.6b:free") == [
+        "minimax/minimax-m2.7:free",
+    ]
+    assert remaining_models_after_routed(chain, "minimax/minimax-m2.7:free") == []
+    assert remaining_models_after_routed(chain, None) == [
+        "liquid/lfm-2.5-2.6b:free",
+        "minimax/minimax-m2.7:free",
+    ]
+    # Never cycle backward.
+    assert "minimax/minimax-m3:free" not in remaining_models_after_routed(
+        chain, "liquid/lfm-2.5-2.6b:free"
+    )
+
+
+def test_valid_first_response_skips_application_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k")
+    reasoner = OpenRouterTemporalReasoner(_openrouter_cfg())
+    ctx = fixture_stable_neutral()
+    eid = build_evidence_payload(ctx, config=_openrouter_cfg())["valid_evidence_ids"][0]
+    raw = _valid_reasoning_json(evidence=[{"evidence_id": eid, "explanation": "ok"}])
+    calls: list[list[str]] = []
+
+    def fake_post(body, *, api_key, api_url, timeout_seconds):  # noqa: ANN001
+        calls.append(list(body["models"]))
+        return _choice_response(content=raw, model="minimax/minimax-m3:free")
+
+    monkeypatch.setattr(
+        "src.temporal.providers.openrouter.post_openrouter_chat_completion",
+        fake_post,
+    )
+    result, diag = reasoner.reason(ctx)
+    assert result.status == "ok"
+    assert len(calls) == 1
+    assert calls[0] == EXPECTED_OPENROUTER_MODEL_CHAIN
+    assert diag.openrouter_application_fallback_attempted is False
+    assert diag.openrouter_attempt_count == 1
+
+
+def test_null_content_from_primary_falls_back_to_remaining_models(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k")
+    reasoner = OpenRouterTemporalReasoner(_openrouter_cfg())
+    ctx = fixture_stable_neutral()
+    eid = build_evidence_payload(ctx, config=_openrouter_cfg())["valid_evidence_ids"][0]
+    raw = _valid_reasoning_json(evidence=[{"evidence_id": eid, "explanation": "ok"}])
+    calls: list[list[str]] = []
+
+    def fake_post(body, *, api_key, api_url, timeout_seconds):  # noqa: ANN001
+        calls.append(list(body["models"]))
+        if len(calls) == 1:
+            return _choice_response(
+                content=None,
+                finish_reason="length",
+                model="minimax/minimax-m3:free",
+                reasoning="SECRET_REASONING_A",
+                usage={
+                    "completion_tokens": 1280,
+                    "completion_tokens_details": {"reasoning_tokens": 1280},
+                },
+            )
+        assert body["models"] == [
+            "liquid/lfm-2.5-2.6b:free",
+            "minimax/minimax-m2.7:free",
+        ]
+        assert "minimax/minimax-m3:free" not in body["models"]
+        return _choice_response(content=raw, model="liquid/lfm-2.5-2.6b:free")
+
+    monkeypatch.setattr(
+        "src.temporal.providers.openrouter.post_openrouter_chat_completion",
+        fake_post,
+    )
+    result, diag = reasoner.reason(ctx)
+    assert result.status == "ok"
+    assert result.model == "liquid/lfm-2.5-2.6b:free"
+    assert len(calls) == 2
+    assert diag.openrouter_application_fallback_attempted is True
+    assert diag.openrouter_application_fallback_from_model == "minimax/minimax-m3:free"
+    assert diag.openrouter_application_fallback_remaining_models == [
+        "liquid/lfm-2.5-2.6b:free",
+        "minimax/minimax-m2.7:free",
+    ]
+    assert diag.openrouter_attempt_count == 2
+    blob = json.dumps(diag.model_dump())
+    assert "SECRET_REASONING_A" not in blob
+
+
+def test_liquid_null_content_falls_back_only_to_m27(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k")
+    reasoner = OpenRouterTemporalReasoner(_openrouter_cfg())
+    ctx = fixture_stable_neutral()
+    eid = build_evidence_payload(ctx, config=_openrouter_cfg())["valid_evidence_ids"][0]
+    raw = _valid_reasoning_json(evidence=[{"evidence_id": eid, "explanation": "ok"}])
+    calls: list[list[str]] = []
+
+    def fake_post(body, *, api_key, api_url, timeout_seconds):  # noqa: ANN001
+        calls.append(list(body["models"]))
+        if len(calls) == 1:
+            # Server-side chain landed on Liquid with null content (live case).
+            return _choice_response(
+                content=None,
+                finish_reason="length",
+                model="liquid/lfm-2.5-2.6b:free",
+                reasoning="x" * 100,
+                usage={
+                    "prompt_tokens": 4105,
+                    "completion_tokens": 768,
+                    "completion_tokens_details": {"reasoning_tokens": 768},
+                },
+            )
+        assert body["models"] == ["minimax/minimax-m2.7:free"]
+        assert "liquid/lfm-2.5-2.6b:free" not in body["models"]
+        assert "minimax/minimax-m3:free" not in body["models"]
+        return _choice_response(content=raw, model="minimax/minimax-m2.7:free")
+
+    monkeypatch.setattr(
+        "src.temporal.providers.openrouter.post_openrouter_chat_completion",
+        fake_post,
+    )
+    result, diag = reasoner.reason(ctx)
+    assert result.status == "ok"
+    assert result.model == "minimax/minimax-m2.7:free"
+    assert diag.openrouter_application_fallback_from_model == "liquid/lfm-2.5-2.6b:free"
+    assert diag.openrouter_application_fallback_remaining_models == [
+        "minimax/minimax-m2.7:free"
+    ]
+    assert len(calls) == 2
+
+
+def test_empty_content_triggers_application_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k")
+    reasoner = OpenRouterTemporalReasoner(_openrouter_cfg())
+    ctx = fixture_stable_neutral()
+    eid = build_evidence_payload(ctx, config=_openrouter_cfg())["valid_evidence_ids"][0]
+    raw = _valid_reasoning_json(evidence=[{"evidence_id": eid, "explanation": "ok"}])
+    calls = {"n": 0}
+
+    def fake_post(body, *, api_key, api_url, timeout_seconds):  # noqa: ANN001
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return _choice_response(content="   ", model="minimax/minimax-m3:free")
+        return _choice_response(content=raw, model="liquid/lfm-2.5-2.6b:free")
+
+    monkeypatch.setattr(
+        "src.temporal.providers.openrouter.post_openrouter_chat_completion",
+        fake_post,
+    )
+    result, diag = reasoner.reason(ctx)
+    assert result.status == "ok"
+    assert calls["n"] == 2
+    assert diag.openrouter_application_fallback_attempted is True
+
+
+def test_all_application_fallback_models_fail_soft(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k")
+    reasoner = OpenRouterTemporalReasoner(_openrouter_cfg())
+    ctx = fixture_stable_neutral()
+    calls: list[list[str]] = []
+
+    def fake_post(body, *, api_key, api_url, timeout_seconds):  # noqa: ANN001
+        calls.append(list(body["models"]))
+        model = body["models"][0]
+        return _choice_response(
+            content=None,
+            finish_reason="length",
+            model=model,
+            reasoning="NO_LEAK",
+        )
+
+    monkeypatch.setattr(
+        "src.temporal.providers.openrouter.post_openrouter_chat_completion",
+        fake_post,
+    )
+    result, diag = reasoner.reason(ctx)
+    assert result.status == "generation_failed"
+    assert result.context_type == "uncertain"
+    assert len(calls) == 2
+    assert calls[0] == EXPECTED_OPENROUTER_MODEL_CHAIN
+    # First response routes to primary → remaining is liquid+m2.7 as one request.
+    assert calls[1][0] == "liquid/lfm-2.5-2.6b:free"
+    assert diag.openrouter_attempt_count <= OPENROUTER_MAX_HTTP_REQUESTS_PER_CALL
+    assert "NO_LEAK" not in json.dumps(diag.model_dump())
+    final = build_final_temporal_assessment(ctx, result, model_id=OPENROUTER_REASONER_MODEL)
+    assert final.overall_wellbeing_indicator == "insufficient_evidence"
+
+
+def test_no_retry_of_model_that_already_returned_unusable_2xx(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k")
+    reasoner = OpenRouterTemporalReasoner(_openrouter_cfg())
+    seen_models: list[str] = []
+
+    def fake_post(body, *, api_key, api_url, timeout_seconds):  # noqa: ANN001
+        for m in body["models"]:
+            seen_models.append(m)
+        return _choice_response(
+            content=None,
+            finish_reason="length",
+            model="liquid/lfm-2.5-2.6b:free",
+        )
+
+    monkeypatch.setattr(
+        "src.temporal.providers.openrouter.post_openrouter_chat_completion",
+        fake_post,
+    )
+    reasoner.reason(fixture_stable_neutral())
+    # Liquid appeared in first chain response as routed; must not be requested again.
+    # Second request should be only m2.7.
+    assert seen_models.count("liquid/lfm-2.5-2.6b:free") == 1
+    assert seen_models[-1] == "minimax/minimax-m2.7:free"
+
+
+def test_auth_failure_does_not_trigger_application_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k")
+    reasoner = OpenRouterTemporalReasoner(_openrouter_cfg())
+    calls = {"n": 0}
+
+    def boom(*_a, **_k):  # noqa: ANN001
+        calls["n"] += 1
+        raise OpenRouterError("auth", status_code=401, error_kind="auth", failure_stage="http_response")
+
+    monkeypatch.setattr(
+        "src.temporal.providers.openrouter.post_openrouter_chat_completion",
+        boom,
+    )
+    result, diag = reasoner.reason(fixture_stable_neutral())
+    assert result.status == "reasoner_unavailable"
+    assert calls["n"] == 1
+    assert diag.openrouter_application_fallback_attempted is False
+    assert not is_application_fallback_eligible(
+        OpenRouterError("auth", status_code=401, error_kind="auth")
+    )
+
+
+def test_transient_429_retry_still_works(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k")
+    reasoner = OpenRouterTemporalReasoner(_openrouter_cfg())
+    ctx = fixture_stable_neutral()
+    eid = build_evidence_payload(ctx, config=_openrouter_cfg())["valid_evidence_ids"][0]
+    raw = _valid_reasoning_json(evidence=[{"evidence_id": eid, "explanation": "ok"}])
+    calls = {"n": 0}
+
+    def flaky(body, *, api_key, api_url, timeout_seconds):  # noqa: ANN001
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OpenRouterError(
+                "rate limited",
+                status_code=429,
+                retryable=True,
+                error_kind="rate_limit",
+                failure_stage="http_response",
+                retry_after=0.0,
+            )
+        return _choice_response(content=raw, model="minimax/minimax-m3:free")
+
+    monkeypatch.setattr(
+        "src.temporal.providers.openrouter.post_openrouter_chat_completion",
+        flaky,
+    )
+    result, diag = reasoner.reason(ctx)
+    assert result.status == "ok"
+    assert calls["n"] == 2
+    assert diag.retry_attempted is True
+    assert diag.openrouter_application_fallback_attempted is False
+    assert diag.openrouter_attempt_count == 2
+
+
+def test_bounded_maximum_request_attempts(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k")
+    reasoner = OpenRouterTemporalReasoner(_openrouter_cfg())
+    calls = {"n": 0}
+
+    def always_null(*_a, **_k):  # noqa: ANN001
+        calls["n"] += 1
+        return _choice_response(
+            content=None,
+            finish_reason="length",
+            model="liquid/lfm-2.5-2.6b:free",
+        )
+
+    monkeypatch.setattr(
+        "src.temporal.providers.openrouter.post_openrouter_chat_completion",
+        always_null,
+    )
+    reasoner.reason(fixture_stable_neutral())
+    assert calls["n"] <= OPENROUTER_MAX_HTTP_REQUESTS_PER_CALL
+    assert calls["n"] == 2  # primary unusable + one app fallback
 
 
 def test_free_endpoint_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1626,7 +1964,7 @@ def test_request_payload_json_serializable_real_fixture() -> None:
         model_id=OPENROUTER_REASONER_MODEL,
         system=OPENROUTER_SYSTEM_INSTRUCTION,
         user=user,
-        max_tokens=768,
+        max_tokens=OPENROUTER_REASONER_MAX_TOKENS,
         fallback_models=[
             "liquid/lfm-2.5-2.6b:free",
             "minimax/minimax-m2.7:free",
@@ -1637,6 +1975,9 @@ def test_request_payload_json_serializable_real_fixture() -> None:
     assert "model" not in parsed
     assert parsed["models"] == EXPECTED_OPENROUTER_MODEL_CHAIN
     assert parsed["response_format"]["type"] == "json_object"
+    assert parsed["reasoning"]["effort"] == "minimal"
+    assert parsed["reasoning"]["exclude"] is True
+    assert parsed["max_tokens"] == 1280
     assert "json_schema" not in parsed["response_format"]
     assert parsed["provider"]["require_parameters"] is True
 

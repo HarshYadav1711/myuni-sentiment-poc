@@ -397,6 +397,25 @@ def render_technical_details(routed: Any) -> str:
                                 lines.append(
                                     "**OpenRouter usage:** `" + ", ".join(usage_bits) + "`"
                                 )
+                    if reasoner_diag.openrouter_application_fallback_attempted:
+                        lines.append("**OpenRouter application fallback:** `attempted`")
+                        if reasoner_diag.openrouter_application_fallback_from_model:
+                            lines.append(
+                                "**OpenRouter fallback from model:** "
+                                f"`{reasoner_diag.openrouter_application_fallback_from_model}`"
+                            )
+                        if reasoner_diag.openrouter_application_fallback_remaining_models:
+                            lines.append(
+                                "**OpenRouter fallback remaining models:** `"
+                                + "`, `".join(
+                                    reasoner_diag.openrouter_application_fallback_remaining_models
+                                )
+                                + "`"
+                            )
+                    if reasoner_diag.openrouter_attempt_count:
+                        lines.append(
+                            f"**OpenRouter HTTP attempts:** `{reasoner_diag.openrouter_attempt_count}`"
+                        )
                 if reasoning is not None and reasoner_diag.provider == "openrouter":
                     http_disp = (
                         reasoner_diag.openrouter_http_status

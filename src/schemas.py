@@ -665,6 +665,20 @@ class TemporalReasonerDiagnostics(BaseModel):
             "usage token counts). Never stores content, prompts, or reasoning text."
         ),
     )
+    openrouter_application_fallback_attempted: bool = False
+    openrouter_application_fallback_from_model: Optional[str] = None
+    openrouter_application_fallback_remaining_models: list[str] = Field(
+        default_factory=list,
+    )
+    openrouter_attempt_count: int = 0
+    openrouter_attempts: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description=(
+            "Safe per-HTTP-attempt summaries only (requested models, routed model, "
+            "HTTP status, finish_reason, content/reasoning presence + lengths, "
+            "token counts, failure kind). Never secrets, prompts, or reasoning text."
+        ),
+    )
 
 
 class DeterministicTemporalContext(BaseModel):

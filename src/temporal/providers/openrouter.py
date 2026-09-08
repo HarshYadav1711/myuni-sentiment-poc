@@ -27,7 +27,12 @@ from datetime import date, datetime
 from enum import Enum
 from typing import Any, Optional, Sequence
 
-from src.config import DEFAULT_TEMPORAL_REASONER, TemporalReasonerConfig
+from src.config import (
+    DEFAULT_TEMPORAL_REASONER,
+    OPENROUTER_MAX_HTTP_REQUESTS_PER_CALL,
+    OPENROUTER_REASONER_MAX_TOKENS,
+    TemporalReasonerConfig,
+)
 from src.schemas import (
     SentimentEvidence,
     TemporalContext,
@@ -206,6 +211,9 @@ def build_openrouter_request_body(
     Raw urllib client sends OpenRouter's documented ordered ``models`` array
     only — no separate top-level ``model`` field — so fallbacks are tried when
     an earlier free model is unavailable / rate-limited.
+
+    Reasoning is minimized and excluded from the returned message: the reasoner
+    receives deterministic evidence and must emit final JSON in ``message.content``.
     """
     ordered_models = build_openrouter_model_chain(
         primary=model_id,
@@ -227,7 +235,40 @@ def build_openrouter_request_body(
         "provider": {
             "require_parameters": True,
         },
+        "reasoning": {
+            "effort": "minimal",
+            "exclude": True,
+        },
     }
+
+
+def remaining_models_after_routed(
+    model_chain: Sequence[str],
+    routed_model: Optional[str],
+) -> list[str]:
+    """Models strictly after the routed (or primary) model — never cycle backward."""
+    chain = [str(m).strip() for m in model_chain if str(m).strip()]
+    if not chain:
+        return []
+    routed = (routed_model or "").strip()
+    if routed:
+        for idx, model in enumerate(chain):
+            if model == routed:
+                return list(chain[idx + 1 :])
+        # Remapped provider id: drop the first requested model only.
+        return list(chain[1:])
+    return list(chain[1:])
+
+
+def is_application_fallback_eligible(exc: BaseException) -> bool:
+    """True when a 2xx response was unusable (null/empty content), not transport/auth."""
+    if not isinstance(exc, OpenRouterError):
+        return False
+    if exc.error_kind != "missing_content":
+        return False
+    if exc.status_code is not None and int(exc.status_code) != 200:
+        return False
+    return True
 
 
 def _parse_retry_after(headers: Any, *, max_wait: float) -> Optional[float]:
@@ -730,6 +771,76 @@ def extract_message_content(response: dict[str, Any]) -> str:
     return text
 
 
+def _resolve_openrouter_max_tokens(config: TemporalReasonerConfig) -> int:
+    """Production OpenRouter budget is 1280; honor explicit non-default overrides."""
+    from src.config import TEMPORAL_REASONER_MAX_NEW_TOKENS
+
+    cfg_tokens = int(config.max_new_tokens)
+    if cfg_tokens in {
+        int(TEMPORAL_REASONER_MAX_NEW_TOKENS),
+        int(OPENROUTER_REASONER_MAX_TOKENS),
+    }:
+        return int(OPENROUTER_REASONER_MAX_TOKENS)
+    return cfg_tokens
+
+
+def _safe_attempt_summary(
+    *,
+    kind: str,
+    requested_models: Sequence[str],
+    routed_model: Optional[str],
+    http_status: Optional[int],
+    shape: Optional[dict[str, Any]],
+    failure_kind: Optional[str],
+) -> dict[str, Any]:
+    """Safe per-attempt record — never prompts, secrets, or reasoning text."""
+    usage = shape.get("usage") if isinstance(shape, dict) else None
+    return {
+        "kind": kind,
+        "requested_models": [str(m) for m in requested_models],
+        "routed_model": routed_model,
+        "http_status": http_status,
+        "finish_reason": (shape or {}).get("finish_reason") if shape else None,
+        "content_present": (shape or {}).get("content_present") if shape else None,
+        "content_length": (shape or {}).get("content_length") if shape else None,
+        "reasoning_present": (shape or {}).get("reasoning_present") if shape else None,
+        "reasoning_length": (shape or {}).get("reasoning_length") if shape else None,
+        "completion_tokens": (usage or {}).get("completion_tokens") if usage else None,
+        "reasoning_tokens": (usage or {}).get("reasoning_tokens") if usage else None,
+        "prompt_tokens": (usage or {}).get("prompt_tokens") if usage else None,
+        "failure_kind": failure_kind,
+    }
+
+
+class _OpenRouterRequestBudget:
+    """Shared hard cap on HTTP POSTs inside one ``reason()`` call.
+
+    Documented maximum (``OPENROUTER_MAX_HTTP_REQUESTS_PER_CALL`` = 4):
+    1. primary models-chain request
+    2. at most one transient 429/5xx retry of the current request
+    3. at most one application-level fallback request (remaining models)
+    4. at most one schema-repair request (no nested app fallback)
+    """
+
+    def __init__(self, *, max_requests: int) -> None:
+        self.max_requests = int(max_requests)
+        self.count = 0
+        self.attempts: list[dict[str, Any]] = []
+        self.application_fallback_attempted = False
+        self.application_fallback_from_model: Optional[str] = None
+        self.application_fallback_remaining_models: list[str] = []
+
+    def consume(self) -> None:
+        if self.count >= self.max_requests:
+            raise OpenRouterError(
+                f"OpenRouter request budget exhausted ({self.max_requests})",
+                retryable=False,
+                error_kind="request_budget_exhausted",
+                failure_stage="unknown",
+            )
+        self.count += 1
+
+
 def _apply_openrouter_failure(
     diagnostics: TemporalReasonerDiagnostics,
     exc: BaseException,
@@ -895,6 +1006,7 @@ class OpenRouterTemporalReasoner:
             fallback_models=self.config.openrouter_fallback_models,
         )
         fallback_models = model_chain[1:]
+        openrouter_max_tokens = _resolve_openrouter_max_tokens(self.config)
         diagnostics.generation_kwargs = {
             "model": self.config.model_id,
             "requested_model": model_chain[0] if model_chain else self.config.model_id,
@@ -903,29 +1015,40 @@ class OpenRouterTemporalReasoner:
             "api_url": self.config.openrouter_api_url,
             "response_format_type": "json_object",
             "provider_require_parameters": True,
-            "max_tokens": int(self.config.max_new_tokens),
+            "max_tokens": openrouter_max_tokens,
+            "reasoning_effort": "minimal",
+            "reasoning_exclude": True,
             "method": "POST",
             "content_type": "application/json",
+            "max_http_requests": int(OPENROUTER_MAX_HTTP_REQUESTS_PER_CALL),
         }
 
+        # Rebuild body with the resolved OpenRouter token budget + reasoning knobs
+        # (payload_build above may have used a stale max_new_tokens default).
+        body = build_openrouter_request_body(
+            model_id=self.config.model_id,
+            system=OPENROUTER_SYSTEM_INSTRUCTION,
+            user=user_prompt,
+            max_tokens=openrouter_max_tokens,
+            fallback_models=list(self.config.openrouter_fallback_models or []),
+        )
+
+        request_budget = _OpenRouterRequestBudget(
+            max_requests=int(OPENROUTER_MAX_HTTP_REQUESTS_PER_CALL),
+        )
         try:
-            raw_text, http_meta = self._generate_with_retry(body, api_key=api_key)
-            diagnostics.http_status = http_meta.get("http_status")
-            diagnostics.openrouter_http_status = http_meta.get("http_status")
-            diagnostics.retry_attempted = bool(http_meta.get("retry_attempted"))
-            diagnostics.generation_seconds = http_meta.get("generation_seconds")
-            diagnostics.raw_output_preview = _redact(raw_text[:500])
-            usage = http_meta.get("usage") or {}
-            if usage.get("prompt_tokens") is not None:
-                diagnostics.prompt_tokens = int(usage["prompt_tokens"])
-            if usage.get("completion_tokens") is not None:
-                diagnostics.generated_tokens = int(usage["completion_tokens"])
-            routed_model = http_meta.get("routed_model")
-            if isinstance(routed_model, str) and routed_model.strip():
-                diagnostics.openrouter_routed_model = routed_model.strip()
-            shape = http_meta.get("response_shape")
-            if isinstance(shape, dict):
-                diagnostics.openrouter_response_shape = shape
+            raw_text, http_meta = self._generate_with_application_fallback(
+                body,
+                api_key=api_key,
+                model_chain=model_chain,
+                system=OPENROUTER_SYSTEM_INSTRUCTION,
+                user=user_prompt,
+                max_tokens=openrouter_max_tokens,
+                budget=request_budget,
+                allow_application_fallback=True,
+            )
+            self._apply_http_meta(diagnostics, http_meta)
+            self._apply_attempt_diagnostics(diagnostics, request_budget)
             reported_model = diagnostics.openrouter_routed_model or self.config.model_id
         except OpenRouterError as exc:
             stage = exc.failure_stage or "unknown"
@@ -937,6 +1060,7 @@ class OpenRouterTemporalReasoner:
                 self.config.model_id,
             )
             _apply_openrouter_failure(diagnostics, exc, stage=stage)
+            self._apply_attempt_diagnostics(diagnostics, request_budget)
             diagnostics.retry_attempted = bool(exc.retry_attempted)
             diagnostics.total_reasoner_seconds = time.perf_counter() - total_started
             if exc.error_kind == "auth" or exc.error_kind in {
@@ -965,6 +1089,10 @@ class OpenRouterTemporalReasoner:
                         "openrouter_http_status": exc.status_code,
                         "openrouter_routed_model": diagnostics.openrouter_routed_model,
                         "openrouter_response_shape": diagnostics.openrouter_response_shape,
+                        "openrouter_application_fallback_attempted": (
+                            diagnostics.openrouter_application_fallback_attempted
+                        ),
+                        "openrouter_attempt_count": diagnostics.openrouter_attempt_count,
                         "provider": "openrouter",
                         "reasoner_configured": True,
                     },
@@ -977,6 +1105,7 @@ class OpenRouterTemporalReasoner:
                 self.config.model_id,
             )
             _apply_openrouter_failure(diagnostics, exc, stage="unknown")
+            self._apply_attempt_diagnostics(diagnostics, request_budget)
             diagnostics.total_reasoner_seconds = time.perf_counter() - total_started
             return (
                 TemporalReasoningResult(
@@ -1046,25 +1175,28 @@ class OpenRouterTemporalReasoner:
                 model_id=self.config.model_id,
                 system=OPENROUTER_SYSTEM_INSTRUCTION,
                 user=repair_user,
-                max_tokens=int(self.config.max_new_tokens),
+                max_tokens=openrouter_max_tokens,
                 fallback_models=list(self.config.openrouter_fallback_models or []),
             )
             try:
                 repair_started = time.perf_counter()
-                raw_retry, repair_meta = self._generate_with_retry(
+                # Schema repair: reuse shared HTTP budget; NO second app-level fallback.
+                raw_retry, repair_meta = self._generate_with_application_fallback(
                     repair_body,
                     api_key=api_key,
+                    model_chain=model_chain,
+                    system=OPENROUTER_SYSTEM_INSTRUCTION,
+                    user=repair_user,
+                    max_tokens=openrouter_max_tokens,
+                    budget=request_budget,
+                    allow_application_fallback=False,
                 )
                 repair_s = time.perf_counter() - repair_started
                 diagnostics.repair_attempted = True
                 diagnostics.repair_generation_seconds = repair_s
-                diagnostics.generation_seconds = (
-                    diagnostics.generation_seconds or 0.0
-                ) + repair_s
                 diagnostics.raw_output_preview = _redact(raw_retry[:500])
-                if repair_meta.get("http_status") is not None:
-                    diagnostics.http_status = repair_meta.get("http_status")
-                    diagnostics.openrouter_http_status = repair_meta.get("http_status")
+                self._apply_http_meta(diagnostics, repair_meta, merge_generation_seconds=True)
+                self._apply_attempt_diagnostics(diagnostics, request_budget)
                 routed_repair = repair_meta.get("routed_model")
                 if isinstance(routed_repair, str) and routed_repair.strip():
                     diagnostics.openrouter_routed_model = routed_repair.strip()
@@ -1074,6 +1206,7 @@ class OpenRouterTemporalReasoner:
                 diagnostics.repair_generation_seconds = (
                     time.perf_counter() - repair_started
                 )
+                self._apply_attempt_diagnostics(diagnostics, request_budget)
                 logger.exception(
                     "OpenRouter repair generation failed model=%s",
                     reported_model,
@@ -1112,6 +1245,7 @@ class OpenRouterTemporalReasoner:
                                 repair_gen_exc,
                             ),
                             "provider": "openrouter",
+                            "openrouter_attempt_count": diagnostics.openrouter_attempt_count,
                         },
                     ),
                     diagnostics,
@@ -1165,18 +1299,93 @@ class OpenRouterTemporalReasoner:
                     diagnostics,
                 )
 
+    def _apply_http_meta(
+        self,
+        diagnostics: TemporalReasonerDiagnostics,
+        http_meta: dict[str, Any],
+        *,
+        merge_generation_seconds: bool = True,
+    ) -> None:
+        diagnostics.http_status = http_meta.get("http_status")
+        diagnostics.openrouter_http_status = http_meta.get("http_status")
+        diagnostics.retry_attempted = bool(
+            diagnostics.retry_attempted or http_meta.get("retry_attempted")
+        )
+        gen_s = http_meta.get("generation_seconds")
+        if gen_s is not None:
+            if merge_generation_seconds and diagnostics.generation_seconds is not None:
+                diagnostics.generation_seconds = float(diagnostics.generation_seconds) + float(
+                    gen_s
+                )
+            else:
+                diagnostics.generation_seconds = float(gen_s)
+        raw = http_meta.get("raw_text")
+        if isinstance(raw, str) and raw:
+            diagnostics.raw_output_preview = _redact(raw[:500])
+        usage = http_meta.get("usage") or {}
+        if usage.get("prompt_tokens") is not None:
+            diagnostics.prompt_tokens = int(usage["prompt_tokens"])
+        if usage.get("completion_tokens") is not None:
+            diagnostics.generated_tokens = int(usage["completion_tokens"])
+        routed_model = http_meta.get("routed_model")
+        if isinstance(routed_model, str) and routed_model.strip():
+            diagnostics.openrouter_routed_model = routed_model.strip()
+        shape = http_meta.get("response_shape")
+        if isinstance(shape, dict):
+            diagnostics.openrouter_response_shape = shape
+        if http_meta.get("application_fallback_attempted"):
+            diagnostics.openrouter_application_fallback_attempted = True
+            from_model = http_meta.get("application_fallback_from_model")
+            if isinstance(from_model, str) and from_model.strip():
+                diagnostics.openrouter_application_fallback_from_model = from_model.strip()
+            remaining = http_meta.get("application_fallback_remaining_models")
+            if isinstance(remaining, list):
+                diagnostics.openrouter_application_fallback_remaining_models = [
+                    str(m) for m in remaining
+                ]
+
+    def _apply_attempt_diagnostics(
+        self,
+        diagnostics: TemporalReasonerDiagnostics,
+        budget: _OpenRouterRequestBudget,
+    ) -> None:
+        diagnostics.openrouter_attempt_count = int(budget.count)
+        diagnostics.openrouter_attempts = list(budget.attempts)
+        if budget.application_fallback_attempted:
+            diagnostics.openrouter_application_fallback_attempted = True
+            diagnostics.openrouter_application_fallback_from_model = (
+                budget.application_fallback_from_model
+            )
+            diagnostics.openrouter_application_fallback_remaining_models = list(
+                budget.application_fallback_remaining_models
+            )
+
     def _generate_with_retry(
         self,
         body: dict[str, Any],
         *,
         api_key: str,
     ) -> tuple[str, dict[str, Any]]:
-        """One normal request + at most one bounded retry for transient 429/5xx."""
+        """One request + at most one bounded transient 429/5xx retry (shared budget).
+
+        Signature kept as ``(body, *, api_key)`` for unit-test monkeypatches.
+        Shared request budget / attempt kind are threaded via instance attributes
+        set by ``_generate_with_application_fallback``.
+        """
+        budget = getattr(self, "_request_budget", None)
+        if budget is None:
+            budget = _OpenRouterRequestBudget(
+                max_requests=int(OPENROUTER_MAX_HTTP_REQUESTS_PER_CALL),
+            )
+            self._request_budget = budget
+        attempt_kind = str(getattr(self, "_attempt_kind", "primary") or "primary")
         max_retries = int(self.config.openrouter_max_transient_retries)
         attempt = 0
         retry_attempted = False
         started = time.perf_counter()
+        requested_models = body.get("models") if isinstance(body.get("models"), list) else []
         while True:
+            budget.consume()
             try:
                 response = post_openrouter_chat_completion(
                     body,
@@ -1184,8 +1393,6 @@ class OpenRouterTemporalReasoner:
                     api_url=self.config.openrouter_api_url,
                     timeout_seconds=self.config.openrouter_timeout_seconds,
                 )
-                # HTTP succeeded (2xx). Capture shape/routed model BEFORE content extract
-                # so response_parse failures retain that metadata.
                 shape = summarize_openrouter_response_shape(response, http_status=200)
                 usage = (
                     response.get("usage")
@@ -1196,8 +1403,6 @@ class OpenRouterTemporalReasoner:
                 try:
                     content = extract_message_content(response)
                 except OpenRouterError as parse_exc:
-                    # Preserve HTTP success + structural metadata on content-shape failure.
-                    # Application parse failure does NOT trigger OpenRouter models fallback.
                     shape_err = (
                         parse_exc.response_shape
                         if isinstance(parse_exc.response_shape, dict)
@@ -1205,6 +1410,16 @@ class OpenRouterTemporalReasoner:
                     )
                     if isinstance(shape_err, dict) and shape_err.get("http_status") is None:
                         shape_err = {**shape_err, "http_status": 200}
+                    budget.attempts.append(
+                        _safe_attempt_summary(
+                            kind=attempt_kind if not retry_attempted else f"{attempt_kind}_transient_retry",
+                            requested_models=requested_models,
+                            routed_model=routed or (shape_err or {}).get("routed_model"),
+                            http_status=200,
+                            shape=shape_err,
+                            failure_kind=parse_exc.error_kind,
+                        )
+                    )
                     raise OpenRouterError(
                         str(parse_exc),
                         status_code=200,
@@ -1215,6 +1430,16 @@ class OpenRouterTemporalReasoner:
                         response_body_preview=parse_exc.response_body_preview,
                         response_shape=shape_err,
                     ) from parse_exc
+                budget.attempts.append(
+                    _safe_attempt_summary(
+                        kind=attempt_kind if not retry_attempted else f"{attempt_kind}_transient_retry",
+                        requested_models=requested_models,
+                        routed_model=routed,
+                        http_status=200,
+                        shape=shape,
+                        failure_kind=None,
+                    )
+                )
                 return content, {
                     "http_status": 200,
                     "retry_attempted": retry_attempted,
@@ -1222,8 +1447,28 @@ class OpenRouterTemporalReasoner:
                     "usage": usage,
                     "routed_model": routed,
                     "response_shape": shape,
+                    "raw_text": content,
                 }
             except OpenRouterError as exc:
+                if exc.error_kind != "missing_content":
+                    budget.attempts.append(
+                        _safe_attempt_summary(
+                            kind=(
+                                attempt_kind
+                                if not retry_attempted
+                                else f"{attempt_kind}_transient_retry"
+                            ),
+                            requested_models=requested_models,
+                            routed_model=(
+                                (exc.response_shape or {}).get("routed_model")
+                                if isinstance(exc.response_shape, dict)
+                                else None
+                            ),
+                            http_status=exc.status_code,
+                            shape=exc.response_shape if isinstance(exc.response_shape, dict) else None,
+                            failure_kind=exc.error_kind,
+                        )
+                    )
                 can_retry = (
                     exc.retryable
                     and attempt < max_retries
@@ -1233,6 +1478,7 @@ class OpenRouterTemporalReasoner:
                         "server_error",
                         "free_endpoint_unavailable",
                     }
+                    and budget.count < budget.max_requests
                 )
                 if not can_retry:
                     raise OpenRouterError(
@@ -1262,3 +1508,60 @@ class OpenRouterTemporalReasoner:
                 )
                 if wait > 0:
                     time.sleep(wait)
+
+    def _generate_with_application_fallback(
+        self,
+        body: dict[str, Any],
+        *,
+        api_key: str,
+        model_chain: Sequence[str],
+        system: str,
+        user: str,
+        max_tokens: int,
+        budget: _OpenRouterRequestBudget,
+        allow_application_fallback: bool,
+    ) -> tuple[str, dict[str, Any]]:
+        """Primary chain request, optional transient retry, optional ONE app fallback.
+
+        Application fallback triggers only on HTTP 2xx with unusable final content
+        (null/empty ``message.content``). It requests only models AFTER the routed
+        model and never retries models that already returned an unusable 2xx.
+        """
+        self._request_budget = budget
+        kind = "primary" if allow_application_fallback else "schema_repair"
+        self._attempt_kind = kind
+        try:
+            content, meta = self._generate_with_retry(body, api_key=api_key)
+            return content, meta
+        except OpenRouterError as exc:
+            if not allow_application_fallback or not is_application_fallback_eligible(exc):
+                raise
+            if budget.application_fallback_attempted:
+                raise
+            shape = exc.response_shape if isinstance(exc.response_shape, dict) else {}
+            routed = None
+            if isinstance(shape.get("routed_model"), str):
+                routed = shape["routed_model"].strip() or None
+            remaining = remaining_models_after_routed(model_chain, routed)
+            if not remaining:
+                raise
+            from_model = routed or (model_chain[0] if model_chain else self.config.model_id)
+            budget.application_fallback_attempted = True
+            budget.application_fallback_from_model = str(from_model)
+            budget.application_fallback_remaining_models = list(remaining)
+            fallback_body = build_openrouter_request_body(
+                model_id=remaining[0],
+                system=system,
+                user=user,
+                max_tokens=int(max_tokens),
+                fallback_models=remaining[1:],
+            )
+            self._attempt_kind = "application_fallback"
+            content, meta = self._generate_with_retry(fallback_body, api_key=api_key)
+            meta = {
+                **meta,
+                "application_fallback_attempted": True,
+                "application_fallback_from_model": str(from_model),
+                "application_fallback_remaining_models": list(remaining),
+            }
+            return content, meta
