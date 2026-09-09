@@ -815,11 +815,14 @@ def _safe_attempt_summary(
 class _OpenRouterRequestBudget:
     """Shared hard cap on HTTP POSTs inside one ``reason()`` call.
 
-    Documented maximum (``OPENROUTER_MAX_HTTP_REQUESTS_PER_CALL`` = 4):
-    1. primary models-chain request
-    2. at most one transient 429/5xx retry of the current request
-    3. at most one application-level fallback request (remaining models)
-    4. at most one schema-repair request (no nested app fallback)
+    Documented maximum (``OPENROUTER_MAX_HTTP_REQUESTS_PER_CALL`` = 4).
+    Typical compositions (never a fifth POST):
+
+    - primary → transient retry → schema repair → one app fallback from repair
+    - primary → one app fallback → schema repair → one transient retry if budget remains
+
+    ``application_fallback_attempted`` is global: at most ONE application-level
+    fallback across primary generation and schema repair combined.
     """
 
     def __init__(self, *, max_requests: int) -> None:
@@ -1046,6 +1049,7 @@ class OpenRouterTemporalReasoner:
                 max_tokens=openrouter_max_tokens,
                 budget=request_budget,
                 allow_application_fallback=True,
+                attempt_kind="primary",
             )
             self._apply_http_meta(diagnostics, http_meta)
             self._apply_attempt_diagnostics(diagnostics, request_budget)
@@ -1180,7 +1184,9 @@ class OpenRouterTemporalReasoner:
             )
             try:
                 repair_started = time.perf_counter()
-                # Schema repair: reuse shared HTTP budget; NO second app-level fallback.
+                # Schema repair reuses the shared HTTP budget and the SAME global
+                # application-fallback slot (budget.application_fallback_attempted).
+                # If primary already used app fallback, repair cannot use another.
                 raw_retry, repair_meta = self._generate_with_application_fallback(
                     repair_body,
                     api_key=api_key,
@@ -1189,7 +1195,8 @@ class OpenRouterTemporalReasoner:
                     user=repair_user,
                     max_tokens=openrouter_max_tokens,
                     budget=request_budget,
-                    allow_application_fallback=False,
+                    allow_application_fallback=True,
+                    attempt_kind="schema_repair",
                 )
                 repair_s = time.perf_counter() - repair_started
                 diagnostics.repair_attempted = True
@@ -1520,16 +1527,20 @@ class OpenRouterTemporalReasoner:
         max_tokens: int,
         budget: _OpenRouterRequestBudget,
         allow_application_fallback: bool,
+        attempt_kind: str = "primary",
     ) -> tuple[str, dict[str, Any]]:
-        """Primary chain request, optional transient retry, optional ONE app fallback.
+        """Chain request, optional transient retry, optional ONE global app fallback.
 
         Application fallback triggers only on HTTP 2xx with unusable final content
         (null/empty ``message.content``). It requests only models AFTER the routed
         model and never retries models that already returned an unusable 2xx.
+
+        The shared ``budget.application_fallback_attempted`` flag is the single
+        authority across primary generation and schema repair — never a second
+        independent fallback mechanism.
         """
         self._request_budget = budget
-        kind = "primary" if allow_application_fallback else "schema_repair"
-        self._attempt_kind = kind
+        self._attempt_kind = str(attempt_kind or "primary")
         try:
             content, meta = self._generate_with_retry(body, api_key=api_key)
             return content, meta

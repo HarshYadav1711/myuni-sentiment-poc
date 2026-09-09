@@ -2239,3 +2239,422 @@ def test_logger_exception_on_generation_failed(
         result, _ = reasoner.reason(fixture_stable_neutral())
     assert result.status == "reasoner_unavailable"
     assert any("OpenRouter generation failed" in r.message for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# Schema repair + single global application fallback
+# ---------------------------------------------------------------------------
+
+
+def test_valid_initial_skips_repair_and_app_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k")
+    reasoner = OpenRouterTemporalReasoner(_openrouter_cfg())
+    ctx = fixture_stable_neutral()
+    eid = build_evidence_payload(ctx, config=_openrouter_cfg())["valid_evidence_ids"][0]
+    raw = _valid_reasoning_json(evidence=[{"evidence_id": eid, "explanation": "ok"}])
+    traj = ctx.features.trajectory
+
+    def fake_post(body, *, api_key, api_url, timeout_seconds):  # noqa: ANN001
+        assert body["reasoning"]["effort"] == "minimal"
+        assert body["reasoning"]["exclude"] is True
+        assert body["max_tokens"] == 1280
+        return _choice_response(content=raw, model="minimax/minimax-m3:free")
+
+    monkeypatch.setattr(
+        "src.temporal.providers.openrouter.post_openrouter_chat_completion",
+        fake_post,
+    )
+    result, diag = reasoner.reason(ctx)
+    assert result.status == "ok"
+    assert diag.repair_attempted is False
+    assert diag.openrouter_application_fallback_attempted is False
+    assert diag.openrouter_attempt_count == 1
+    assert ctx.features.trajectory == traj
+
+
+def test_initial_null_content_app_fallback_still_works(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k")
+    reasoner = OpenRouterTemporalReasoner(_openrouter_cfg())
+    ctx = fixture_stable_neutral()
+    eid = build_evidence_payload(ctx, config=_openrouter_cfg())["valid_evidence_ids"][0]
+    raw = _valid_reasoning_json(evidence=[{"evidence_id": eid, "explanation": "ok"}])
+    calls: list[list[str]] = []
+
+    def fake_post(body, *, api_key, api_url, timeout_seconds):  # noqa: ANN001
+        calls.append(list(body["models"]))
+        if len(calls) == 1:
+            return _choice_response(
+                content=None,
+                finish_reason="length",
+                model="minimax/minimax-m3:free",
+            )
+        return _choice_response(content=raw, model="liquid/lfm-2.5-2.6b:free")
+
+    monkeypatch.setattr(
+        "src.temporal.providers.openrouter.post_openrouter_chat_completion",
+        fake_post,
+    )
+    result, diag = reasoner.reason(ctx)
+    assert result.status == "ok"
+    assert diag.repair_attempted is False
+    assert diag.openrouter_application_fallback_attempted is True
+    assert diag.openrouter_application_fallback_from_model == "minimax/minimax-m3:free"
+    assert len(calls) == 2
+
+
+def test_invalid_schema_triggers_repair_without_app_fallback_when_repair_ok(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k")
+    reasoner = OpenRouterTemporalReasoner(_openrouter_cfg())
+    ctx = fixture_stable_neutral()
+    eid = build_evidence_payload(ctx, config=_openrouter_cfg())["valid_evidence_ids"][0]
+    good = _valid_reasoning_json(evidence=[{"evidence_id": eid, "explanation": "ok"}])
+    calls = {"n": 0}
+
+    def fake_post(body, *, api_key, api_url, timeout_seconds):  # noqa: ANN001
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return _choice_response(
+                content="not json at all",
+                model="minimax/minimax-m3:free",
+            )
+        assert "Validation error" in body["messages"][1]["content"]
+        return _choice_response(content=good, model="minimax/minimax-m3:free")
+
+    monkeypatch.setattr(
+        "src.temporal.providers.openrouter.post_openrouter_chat_completion",
+        fake_post,
+    )
+    result, diag = reasoner.reason(ctx)
+    assert result.status == "ok"
+    assert diag.repair_attempted is True
+    assert diag.repair_generation_seconds is not None
+    assert diag.openrouter_application_fallback_attempted is False
+    assert diag.openrouter_attempt_count == 2
+    assert any(a.get("kind") == "schema_repair" for a in diag.openrouter_attempts)
+    assert "SECRET" not in json.dumps(diag.model_dump())
+
+
+def test_repair_liquid_null_falls_back_only_to_gemma(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Live-like: primary content fails schema; repair routes to Liquid null → Gemma."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k")
+    reasoner = OpenRouterTemporalReasoner(_openrouter_cfg())
+    ctx = fixture_stable_neutral()
+    eid = build_evidence_payload(ctx, config=_openrouter_cfg())["valid_evidence_ids"][0]
+    good = _valid_reasoning_json(evidence=[{"evidence_id": eid, "explanation": "ok"}])
+    traj = ctx.features.trajectory
+    calls: list[list[str]] = []
+
+    def fake_post(body, *, api_key, api_url, timeout_seconds):  # noqa: ANN001
+        calls.append(list(body["models"]))
+        assert body["reasoning"]["effort"] == "minimal"
+        assert body["reasoning"]["exclude"] is True
+        assert body["max_tokens"] == 1280
+        if len(calls) == 1:
+            # Initial generation returns content that fails local schema validation.
+            return _choice_response(
+                content='{"summary":"broken"}',
+                model="minimax/minimax-m3:free",
+            )
+        if len(calls) == 2:
+            # Schema repair full chain routes to Liquid with null content.
+            assert body["models"] == EXPECTED_OPENROUTER_MODEL_CHAIN
+            return _choice_response(
+                content=None,
+                finish_reason="length",
+                model="liquid/lfm-2.5-2.6b:free",
+                reasoning="SECRET_REPAIR_REASONING",
+                usage={
+                    "prompt_tokens": 1460,
+                    "completion_tokens": 1280,
+                    "completion_tokens_details": {"reasoning_tokens": 1280},
+                },
+            )
+        # Global app fallback: remaining after Liquid is only Gemma.
+        assert body["models"] == ["google/gemma-4-26b-a4b-it:free"]
+        assert "liquid/lfm-2.5-2.6b:free" not in body["models"]
+        assert "minimax/minimax-m3:free" not in body["models"]
+        return _choice_response(content=good, model="google/gemma-4-26b-a4b-it:free")
+
+    monkeypatch.setattr(
+        "src.temporal.providers.openrouter.post_openrouter_chat_completion",
+        fake_post,
+    )
+    result, diag = reasoner.reason(ctx)
+    assert result.status == "ok"
+    assert result.model == "google/gemma-4-26b-a4b-it:free"
+    assert diag.repair_attempted is True
+    assert diag.openrouter_application_fallback_attempted is True
+    assert diag.openrouter_application_fallback_from_model == "liquid/lfm-2.5-2.6b:free"
+    assert diag.openrouter_application_fallback_remaining_models == [
+        "google/gemma-4-26b-a4b-it:free"
+    ]
+    assert len(calls) == 3
+    assert diag.openrouter_attempt_count == 3
+    assert diag.openrouter_attempt_count <= OPENROUTER_MAX_HTTP_REQUESTS_PER_CALL
+    kinds = [a.get("kind") for a in diag.openrouter_attempts]
+    assert "schema_repair" in kinds
+    assert "application_fallback" in kinds
+    blob = json.dumps(diag.model_dump()) + json.dumps(result.model_dump())
+    assert "SECRET_REPAIR_REASONING" not in blob
+    assert ctx.features.trajectory == traj
+
+
+def test_repair_gemma_fallback_fail_soft(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k")
+    reasoner = OpenRouterTemporalReasoner(_openrouter_cfg())
+    ctx = fixture_stable_neutral()
+    traj = ctx.features.trajectory
+    calls: list[list[str]] = []
+
+    def fake_post(body, *, api_key, api_url, timeout_seconds):  # noqa: ANN001
+        calls.append(list(body["models"]))
+        if len(calls) == 1:
+            return _choice_response(
+                content="not-json",
+                model="minimax/minimax-m3:free",
+            )
+        if len(calls) == 2:
+            return _choice_response(
+                content=None,
+                finish_reason="length",
+                model="liquid/lfm-2.5-2.6b:free",
+                reasoning="NO_LEAK",
+            )
+        return _choice_response(
+            content=None,
+            finish_reason="length",
+            model="google/gemma-4-26b-a4b-it:free",
+            reasoning="NO_LEAK_GEMMA",
+        )
+
+    monkeypatch.setattr(
+        "src.temporal.providers.openrouter.post_openrouter_chat_completion",
+        fake_post,
+    )
+    result, diag = reasoner.reason(ctx)
+    assert result.status == "generation_failed"
+    assert result.context_type == "uncertain"
+    assert diag.repair_attempted is True
+    assert diag.openrouter_application_fallback_attempted is True
+    assert diag.openrouter_application_fallback_remaining_models == [
+        "google/gemma-4-26b-a4b-it:free"
+    ]
+    assert len(calls) == 3
+    assert diag.openrouter_attempt_count <= OPENROUTER_MAX_HTTP_REQUESTS_PER_CALL
+    assert "NO_LEAK" not in json.dumps(diag.model_dump())
+    assert ctx.features.trajectory == traj
+    final = build_final_temporal_assessment(ctx, result, model_id=OPENROUTER_REASONER_MODEL)
+    assert final.status == "explanation_unavailable"
+    assert final.overall_wellbeing_indicator == "insufficient_evidence"
+    assert CONTEXT_UNAVAILABLE_MESSAGE in final.uncertainty_note
+
+
+def test_primary_app_fallback_blocks_second_fallback_on_repair(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k")
+    reasoner = OpenRouterTemporalReasoner(_openrouter_cfg())
+    ctx = fixture_stable_neutral()
+    calls: list[list[str]] = []
+
+    def fake_post(body, *, api_key, api_url, timeout_seconds):  # noqa: ANN001
+        calls.append(list(body["models"]))
+        if len(calls) == 1:
+            # Primary unusable → consumes the one global app-fallback slot.
+            return _choice_response(
+                content=None,
+                finish_reason="length",
+                model="minimax/minimax-m3:free",
+            )
+        if len(calls) == 2:
+            # App fallback returns content that fails schema validation.
+            assert body["models"] == [
+                "liquid/lfm-2.5-2.6b:free",
+                "google/gemma-4-26b-a4b-it:free",
+            ]
+            return _choice_response(
+                content="still not json",
+                model="liquid/lfm-2.5-2.6b:free",
+            )
+        # Repair may run, but must NOT open another app-fallback request.
+        assert body["models"] == EXPECTED_OPENROUTER_MODEL_CHAIN
+        return _choice_response(
+            content=None,
+            finish_reason="length",
+            model="liquid/lfm-2.5-2.6b:free",
+        )
+
+    monkeypatch.setattr(
+        "src.temporal.providers.openrouter.post_openrouter_chat_completion",
+        fake_post,
+    )
+    result, diag = reasoner.reason(ctx)
+    assert result.status == "generation_failed"
+    assert diag.openrouter_application_fallback_attempted is True
+    assert diag.repair_attempted is True
+    assert len(calls) == 3
+    # No fourth request targeting only Gemma from a second app fallback.
+    assert not any(c == ["google/gemma-4-26b-a4b-it:free"] for c in calls)
+    assert diag.openrouter_attempt_count <= OPENROUTER_MAX_HTTP_REQUESTS_PER_CALL
+
+
+def test_transient_retry_plus_repair_plus_fallback_respects_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k")
+    reasoner = OpenRouterTemporalReasoner(_openrouter_cfg())
+    ctx = fixture_stable_neutral()
+    eid = build_evidence_payload(ctx, config=_openrouter_cfg())["valid_evidence_ids"][0]
+    good = _valid_reasoning_json(evidence=[{"evidence_id": eid, "explanation": "ok"}])
+    calls = {"n": 0}
+
+    def fake_post(body, *, api_key, api_url, timeout_seconds):  # noqa: ANN001
+        calls["n"] += 1
+        assert calls["n"] <= OPENROUTER_MAX_HTTP_REQUESTS_PER_CALL
+        if calls["n"] == 1:
+            raise OpenRouterError(
+                "rate limited",
+                status_code=429,
+                retryable=True,
+                error_kind="rate_limit",
+                failure_stage="http_response",
+            )
+        if calls["n"] == 2:
+            # Transient retry succeeds with invalid schema content.
+            return _choice_response(content="nope", model="minimax/minimax-m3:free")
+        if calls["n"] == 3:
+            # Repair routes to Liquid null content.
+            return _choice_response(
+                content=None,
+                finish_reason="length",
+                model="liquid/lfm-2.5-2.6b:free",
+            )
+        # Fourth request: app fallback to Gemma succeeds.
+        assert body["models"] == ["google/gemma-4-26b-a4b-it:free"]
+        return _choice_response(content=good, model="google/gemma-4-26b-a4b-it:free")
+
+    monkeypatch.setattr(
+        "src.temporal.providers.openrouter.post_openrouter_chat_completion",
+        fake_post,
+    )
+    monkeypatch.setattr("src.temporal.providers.openrouter.time.sleep", lambda *_a, **_k: None)
+    result, diag = reasoner.reason(ctx)
+    assert result.status == "ok"
+    assert result.model == "google/gemma-4-26b-a4b-it:free"
+    assert calls["n"] == 4
+    assert diag.openrouter_attempt_count == 4
+    assert diag.openrouter_attempt_count <= OPENROUTER_MAX_HTTP_REQUESTS_PER_CALL
+    assert diag.repair_attempted is True
+    assert diag.openrouter_application_fallback_attempted is True
+    assert diag.retry_attempted is True
+
+
+def test_repair_diagnostics_exposed_safely_in_gradio() -> None:
+    from src.schemas import TemporalReasonerDiagnostics
+
+    assessment = FinalTemporalAssessment(
+        status="explanation_unavailable",
+        context_type="uncertain",
+        overall_wellbeing_indicator="insufficient_evidence",
+        reasoner_configured=True,
+        uncertainty_note=CONTEXT_UNAVAILABLE_MESSAGE,
+    )
+    diag = TemporalReasonerDiagnostics(
+        provider="openrouter",
+        repair_attempted=True,
+        repair_generation_seconds=1.25,
+        openrouter_application_fallback_attempted=True,
+        openrouter_application_fallback_from_model="liquid/lfm-2.5-2.6b:free",
+        openrouter_application_fallback_remaining_models=[
+            "google/gemma-4-26b-a4b-it:free"
+        ],
+        openrouter_attempt_count=3,
+        openrouter_attempts=[
+            {
+                "kind": "primary",
+                "requested_models": EXPECTED_OPENROUTER_MODEL_CHAIN,
+                "routed_model": "minimax/minimax-m3:free",
+                "http_status": 200,
+                "finish_reason": "stop",
+                "content_present": True,
+                "content_length": 20,
+                "reasoning_present": False,
+                "reasoning_length": 0,
+                "completion_tokens": 40,
+                "reasoning_tokens": 0,
+                "failure_kind": None,
+            },
+            {
+                "kind": "schema_repair",
+                "requested_models": EXPECTED_OPENROUTER_MODEL_CHAIN,
+                "routed_model": "liquid/lfm-2.5-2.6b:free",
+                "http_status": 200,
+                "finish_reason": "length",
+                "content_present": False,
+                "content_length": 0,
+                "reasoning_present": True,
+                "reasoning_length": 100,
+                "completion_tokens": 1280,
+                "reasoning_tokens": 1280,
+                "failure_kind": "missing_content",
+            },
+        ],
+        openrouter_failure_stage="response_parse",
+        openrouter_error_message="missing_content: model=liquid/lfm-2.5-2.6b:free",
+        generation_kwargs={
+            "model_chain": EXPECTED_OPENROUTER_MODEL_CHAIN,
+            "requested_model": "minimax/minimax-m3:free",
+            "fallback_models": [
+                "liquid/lfm-2.5-2.6b:free",
+                "google/gemma-4-26b-a4b-it:free",
+            ],
+            "reasoning_effort": "minimal",
+            "reasoning_exclude": True,
+            "max_tokens": 1280,
+        },
+    )
+    result = ActivityAnalysisResult(
+        activity_id="A-repair-diag",
+        activity_type="video",
+        input=InputMetadata(),
+        analysis=AnalysisBlock(
+            overall=_ev("neutral"),
+            modalities=ModalityBundle(visual=_ev("neutral")),
+            final_temporal_assessment=assessment,
+            temporal_reasoning=TemporalReasoningResult(
+                status="generation_failed",
+                context_type="uncertain",
+                confidence=0.0,
+                model=OPENROUTER_REASONER_MODEL,
+            ),
+            temporal_reasoner_diagnostics=diag,
+            video=VideoDiagnostics(frames_extracted=1, frames_analyzed=1),
+        ),
+    )
+    tech = render_technical_details(
+        RoutedAnalysisResult(
+            status=CapabilityStatus.OK,
+            detected_input=InputType.VIDEO,
+            analysis=result,
+        ),
+    )
+    assert "**OpenRouter schema repair:** `attempted`" in tech
+    assert "**OpenRouter repair generation time:** `1.25s`" in tech
+    assert "**OpenRouter attempt summaries:**" in tech
+    assert "kind=`schema_repair`" in tech
+    assert "failure_kind=`missing_content`" in tech
+    assert "SECRET" not in tech
+    assert "reasoning_details" not in tech.lower() or "reasoning_details_present" in tech.lower()
+    assert "OPENROUTER_API_KEY" not in tech
+    assert "sk-" not in tech
+    assert "Bearer" not in tech

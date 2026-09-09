@@ -412,10 +412,58 @@ def render_technical_details(routed: Any) -> str:
                                 )
                                 + "`"
                             )
+                    else:
+                        lines.append("**OpenRouter application fallback:** `not attempted`")
+                    repair_label = (
+                        "attempted" if reasoner_diag.repair_attempted else "not attempted"
+                    )
+                    lines.append(f"**OpenRouter schema repair:** `{repair_label}`")
+                    if reasoner_diag.repair_attempted and (
+                        reasoner_diag.repair_generation_seconds is not None
+                    ):
+                        lines.append(
+                            "**OpenRouter repair generation time:** "
+                            f"`{float(reasoner_diag.repair_generation_seconds):.2f}s`"
+                        )
                     if reasoner_diag.openrouter_attempt_count:
                         lines.append(
                             f"**OpenRouter HTTP attempts:** `{reasoner_diag.openrouter_attempt_count}`"
                         )
+                    attempts = reasoner_diag.openrouter_attempts or []
+                    if attempts:
+                        lines.append("**OpenRouter attempt summaries:**")
+                        for idx, attempt in enumerate(attempts, start=1):
+                            if not isinstance(attempt, dict):
+                                continue
+                            kind = attempt.get("kind") or "n/a"
+                            requested = attempt.get("requested_models") or []
+                            if isinstance(requested, list):
+                                req_txt = ", ".join(str(m) for m in requested) or "n/a"
+                            else:
+                                req_txt = "n/a"
+                            routed = attempt.get("routed_model") or "n/a"
+                            http_st = attempt.get("http_status")
+                            http_txt = "n/a" if http_st is None else str(http_st)
+                            fr = attempt.get("finish_reason") or "n/a"
+                            content_present = attempt.get("content_present")
+                            content_len = attempt.get("content_length")
+                            reasoning_present = attempt.get("reasoning_present")
+                            reasoning_len = attempt.get("reasoning_length")
+                            completion_tokens = attempt.get("completion_tokens")
+                            reasoning_tokens = attempt.get("reasoning_tokens")
+                            failure_kind = attempt.get("failure_kind") or "none"
+                            lines.append(
+                                f"- attempt=`{idx}` kind=`{kind}` "
+                                f"requested=`{req_txt}` routed=`{routed}` "
+                                f"http=`{http_txt}` finish_reason=`{fr}` "
+                                f"content_present=`{content_present}` "
+                                f"content_length=`{content_len}` "
+                                f"reasoning_present=`{reasoning_present}` "
+                                f"reasoning_length=`{reasoning_len}` "
+                                f"completion_tokens=`{completion_tokens}` "
+                                f"reasoning_tokens=`{reasoning_tokens}` "
+                                f"failure_kind=`{failure_kind}`"
+                            )
                 if reasoning is not None and reasoner_diag.provider == "openrouter":
                     http_disp = (
                         reasoner_diag.openrouter_http_status
