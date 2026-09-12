@@ -155,6 +155,24 @@ WELLBEING_MODERATE_PERSISTENCE = 0.30
 WELLBEING_HIGH_STRONGEST_NEG = 0.70
 WELLBEING_HIGH_NEG_RUN = 2
 
+# ---------------------------------------------------------------------------
+# Independent wellbeing / context classifier (Phase 4 foundation).
+# Local Transformers zero-shot only — never an external inference API.
+# ---------------------------------------------------------------------------
+
+WELLBEING_CLASSIFIER_ENABLED = True
+DEFAULT_WELLBEING_CLASSIFIER_MODEL = (
+    "MoritzLaurer/deberta-v3-base-zeroshot-v2.0-c"
+)
+# Provisional multi-label selection floor for the POC.
+# This threshold is provisional and must be calibrated against an
+# in-domain validation set. It is not clinically validated.
+WELLBEING_SIGNAL_POC_THRESHOLD = 0.5
+# Extremely short text is insufficient — missing != neutral.
+WELLBEING_CLASSIFIER_MIN_CHARS = 12
+# Soft character cap before truncation (model still token-limits internally).
+WELLBEING_CLASSIFIER_MAX_CHARS = 2000
+
 # RoBERTa max sequence length; longer transcripts are chunked (not silently truncated).
 TEXT_MAX_LENGTH = 512
 TEXT_CHUNK_SIZE = 480
@@ -492,9 +510,95 @@ def load_fusion_config(path: Optional[Path] = None) -> FusionConfig:
     )
 
 
+@dataclass(frozen=True)
+class WellbeingClassifierConfig:
+    """Narrow config for the Phase 4 independent wellbeing classifier.
+
+    Always local Transformers inference. Environment variables must not
+    redirect this classifier to an external inference API.
+    """
+
+    enabled: bool = WELLBEING_CLASSIFIER_ENABLED
+    model_id: str = DEFAULT_WELLBEING_CLASSIFIER_MODEL
+    signal_poc_threshold: float = WELLBEING_SIGNAL_POC_THRESHOLD
+    min_chars: int = WELLBEING_CLASSIFIER_MIN_CHARS
+    max_chars: int = WELLBEING_CLASSIFIER_MAX_CHARS
+
+    def __post_init__(self) -> None:
+        if not (0.0 <= self.signal_poc_threshold <= 1.0):
+            raise ValueError("signal_poc_threshold must be in [0, 1]")
+        if self.min_chars < 1:
+            raise ValueError("min_chars must be >= 1")
+        if self.max_chars < self.min_chars:
+            raise ValueError("max_chars must be >= min_chars")
+        model = (self.model_id or "").strip()
+        if not model:
+            raise ValueError("model_id must be non-empty")
+        # Guard against silently turning the classifier into a remote API URL.
+        lowered = model.lower()
+        if lowered.startswith(("http://", "https://", "openrouter:")):
+            raise ValueError(
+                "WELLBEING_CLASSIFIER_MODEL must be a local Hugging Face "
+                "model id, not a remote API endpoint",
+            )
+        object.__setattr__(self, "model_id", model)
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    value = raw.strip().lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
+def resolve_wellbeing_classifier_config(
+    *,
+    overrides: Optional[Mapping[str, Any]] = None,
+) -> WellbeingClassifierConfig:
+    """Build wellbeing-classifier config from environment + defaults.
+
+    Environment variables:
+    - ``WELLBEING_CLASSIFIER_ENABLED`` (default true)
+    - ``WELLBEING_CLASSIFIER_MODEL`` (local HF model id only)
+    - ``WELLBEING_SIGNAL_POC_THRESHOLD`` (provisional; not clinically validated)
+
+    No environment variable may redirect inference to an external API.
+    """
+    model_id = (
+        os.environ.get(
+            "WELLBEING_CLASSIFIER_MODEL",
+            DEFAULT_WELLBEING_CLASSIFIER_MODEL,
+        )
+        or DEFAULT_WELLBEING_CLASSIFIER_MODEL
+    ).strip()
+    threshold_raw = os.environ.get("WELLBEING_SIGNAL_POC_THRESHOLD")
+    threshold = WELLBEING_SIGNAL_POC_THRESHOLD
+    if threshold_raw is not None and str(threshold_raw).strip():
+        threshold = float(threshold_raw)
+    kwargs: dict[str, Any] = {
+        "enabled": _env_bool(
+            "WELLBEING_CLASSIFIER_ENABLED",
+            WELLBEING_CLASSIFIER_ENABLED,
+        ),
+        "model_id": model_id,
+        "signal_poc_threshold": threshold,
+        "min_chars": WELLBEING_CLASSIFIER_MIN_CHARS,
+        "max_chars": WELLBEING_CLASSIFIER_MAX_CHARS,
+    }
+    if overrides:
+        kwargs.update(dict(overrides))
+    return WellbeingClassifierConfig(**kwargs)
+
+
 DEFAULT_FUSION = load_fusion_config()
 DEFAULT_VIDEO_SAMPLING = VideoSamplingConfig()
 DEFAULT_TEMPORAL = TemporalConfig()
 DEFAULT_TEMPORAL_REASONER = TemporalReasonerConfig(
     max_new_tokens=OPENROUTER_REASONER_MAX_TOKENS,
 )
+DEFAULT_WELLBEING_CLASSIFIER = WellbeingClassifierConfig()

@@ -4,6 +4,7 @@
 # Space install file: requirements-hf.txt (Python 3.12.12, torch==2.11.0, ZeroGPU).
 torch>=2.0.0,<3
 transformers>=4.45.0,<5.0.0
+sentencepiece>=0.2.0
 numpy>=1.24.0,<3
 scipy>=1.10.0,<2
 pydantic>=2.0.0,<3
