@@ -242,15 +242,90 @@ Schemas live in `src/wellbeing/schemas.py` (package-local), not in the
 pipeline-wide `src/schemas.py`, so this foundation stays isolated until a
 later wiring pass — same pattern as `src/temporal/benchmark/schemas.py`.
 
-## Later connection to temporal video evidence
+## Phase 4B — shadow-mode pipeline integration
 
-Video already produces speech transcripts, OCR text, and temporal windows.
-A later milestone can feed **text evidence** (speech/OCR/captions) from
-those windows into this classifier, then combine relevance/target/signals
-with deterministic temporal features.
+Shadow mode attaches the independent classifier to real analysis flows
+**without** giving it authority over client-facing decisions.
 
-Visual appearance and face crops remain out of scope for wellbeing
-classification.
+**Negative sentiment is not equivalent to poor wellbeing.**
+
+**Shadow evidence does not alter the client-facing wellbeing indicator.**
+
+### What shadow mode is
+
+When `WELLBEING_SHADOW_ENABLED=true`:
+
+1. Collect authored textual evidence already produced by the pipeline
+2. Run DeBERTa via `classify_many` (batched)
+3. Store `AnalysisBlock.wellbeing_shadow` (`WellbeingShadowAnalysis`)
+
+When disabled (default):
+
+- `wellbeing_shadow` remains `None`
+- DeBERTa is **not** loaded or downloaded
+
+### Parallel architecture
+
+```
+                 ┌─ sentiment / fusion / temporal / OpenRouter / gate
+content ─────────┤
+                 └─ DeBERTa wellbeing shadow ──→ wellbeing_shadow only
+```
+
+No authority crossover in Phase 4B.
+
+### Inputs that feed the shadow classifier
+
+| Source | Used? | Role |
+| --- | --- | --- |
+| Primary text activity | Yes | `primary_text` |
+| Author-provided caption | Yes | `caption` |
+| Faster-Whisper transcript | Yes (reuse only) | `transcript` |
+| Usable temporal window speech | Yes (reuse segments) | `speech_window` |
+| Image/video OCR | **No** | uncertain authorship |
+| SigLIP / faces / frames | **No** | safety boundary |
+
+### Why OCR is excluded
+
+OCR may come from memes, slides, quotes, subtitles, or reposted video.
+Until a provenance policy exists, OCR must not become personal wellbeing
+evidence.
+
+### Why ASR / timestamps are reused
+
+Shadow mode reuses:
+
+- the existing ONE Faster-Whisper pass (`bundle.transcript`)
+- existing `TemporalContext` windows and `speech_segments`
+
+It does **not**:
+
+- rerun Whisper
+- recompute 5-second windows
+- modify temporal sentiment
+
+### Window outputs
+
+Per-window shadow results store index / start / end / classification only.
+**No raw speech text** is persisted in `wellbeing_shadow`.
+
+### CPU latency / default OFF
+
+DeBERTa CPU inference is expensive. Shadow mode defaults to **OFF** so
+deployment and ordinary analysis do not silently add large runtime.
+
+Enable explicitly for local/evaluation runs via `WELLBEING_SHADOW_ENABLED`.
+
+### Failure isolation
+
+If the classifier fails to load or infer, the main analysis still succeeds
+and `wellbeing_shadow.status` records `error` / `classifier_unavailable`.
+
+### What comes next (Phase 4C)
+
+Use shadow evidence from controlled live runs to decide whether (and how)
+classifier outputs may later inform the wellbeing gate — still without
+conflating sentiment polarity with wellbeing.
 
 ## Why OpenRouter is not the authority for classifier labels
 
@@ -266,11 +341,11 @@ labels.
 ## Limitations (current pass)
 
 - Zero-shot DeBERTa is a POC baseline, not an in-domain trained classifier
-- Signal threshold is uncalibrated
-- Not yet connected to `compute_wellbeing_indicator()` or temporal fusion
-- No multimodal / facial path (by design)
-- Human semantic fixtures exist for later evaluation; ordinary unit tests
-  mock the pipeline and do not require live model correctness
+- Signal threshold remains provisional (0.5)
+- Shadow mode is non-authoritative (Phase 4B) — does not feed
+  `compute_wellbeing_indicator()` or `FinalTemporalAssessment`
+- No multimodal / facial / OCR personal-attribution path (by design)
+- Ordinary unit tests mock the classifier; no live DeBERTa in normal pytest
 
 ## Calibration plan
 

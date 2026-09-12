@@ -23,6 +23,7 @@ from src.config import (
     TemporalReasonerConfig,
     VideoSamplingConfig,
     resolve_temporal_reasoner_config,
+    resolve_wellbeing_shadow_enabled,
 )
 from src.fusion import fuse_modalities
 from src.media.ffmpeg_utils import FFmpegError, FFmpegNotFoundError
@@ -42,6 +43,7 @@ from src.schemas import (
     ModalityBundle,
     SpeechAnalysisResult,
 )
+from src.wellbeing.shadow import build_wellbeing_shadow
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +107,32 @@ class MyUniSentimentPipeline:
     @property
     def video_analyzer(self) -> VideoAnalyzer:
         return self._video_analyzer
+
+    def _with_wellbeing_shadow(
+        self,
+        analysis: AnalysisBlock,
+        *,
+        primary_text: Optional[str] = None,
+        caption: Optional[str] = None,
+        transcript: Optional[str] = None,
+        temporal_context: object = None,
+    ) -> AnalysisBlock:
+        """Attach Phase 4B shadow evidence without altering existing fields.
+
+        When shadow mode is disabled, returns ``analysis`` unchanged and does
+        not load DeBERTa. Failures are captured inside the shadow result.
+        """
+        if not resolve_wellbeing_shadow_enabled():
+            return analysis
+        shadow = build_wellbeing_shadow(
+            primary_text=primary_text,
+            caption=caption,
+            transcript=transcript,
+            temporal_context=temporal_context,
+        )
+        if shadow is None:
+            return analysis
+        return analysis.model_copy(update={"wellbeing_shadow": shadow})
 
     def analyze_speech(self, media_path: object) -> SpeechAnalysisResult:
         """Run the speech branch on an audio/video media path."""
@@ -347,12 +375,15 @@ class MyUniSentimentPipeline:
             user_id=user_id,
             activity_type="audio",
             input=InputMetadata(media_path=media_path),
-            analysis=AnalysisBlock(
-                overall=overall,
-                modalities=modalities,
-                fusion=diagnostics,
-                runtime=build_poc_runtime_info(self),
-                warnings=list(speech.warnings),
+            analysis=self._with_wellbeing_shadow(
+                AnalysisBlock(
+                    overall=overall,
+                    modalities=modalities,
+                    fusion=diagnostics,
+                    runtime=build_poc_runtime_info(self),
+                    warnings=list(speech.warnings),
+                    transcript=speech.transcript,
+                ),
                 transcript=speech.transcript,
             ),
         )
@@ -400,30 +431,34 @@ class MyUniSentimentPipeline:
             user_id=user_id,
             activity_type="video",
             input=InputMetadata(media_path=media_path),
-            analysis=AnalysisBlock(
-                overall=fusion.overall,
-                modalities=ModalityBundle(
-                    visual=bundle.visual,
-                    speech=bundle.speech,
+            analysis=self._with_wellbeing_shadow(
+                AnalysisBlock(
+                    overall=fusion.overall,
+                    modalities=ModalityBundle(
+                        visual=bundle.visual,
+                        speech=bundle.speech,
+                    ),
+                    fusion=diagnostics,
+                    runtime=build_poc_runtime_info(self),
+                    warnings=list(bundle.warnings),
+                    transcript=bundle.transcript,
+                    video=bundle.diagnostics,
+                    temporal_context=bundle.temporal_context,
+                    deterministic_context=getattr(bundle, "deterministic_context", None),
+                    temporal_reasoning=getattr(bundle, "temporal_reasoning", None),
+                    temporal_reasoner_diagnostics=getattr(
+                        bundle,
+                        "temporal_reasoner_diagnostics",
+                        None,
+                    ),
+                    final_temporal_assessment=getattr(
+                        bundle,
+                        "final_temporal_assessment",
+                        None,
+                    ),
                 ),
-                fusion=diagnostics,
-                runtime=build_poc_runtime_info(self),
-                warnings=list(bundle.warnings),
                 transcript=bundle.transcript,
-                video=bundle.diagnostics,
                 temporal_context=bundle.temporal_context,
-                deterministic_context=getattr(bundle, "deterministic_context", None),
-                temporal_reasoning=getattr(bundle, "temporal_reasoning", None),
-                temporal_reasoner_diagnostics=getattr(
-                    bundle,
-                    "temporal_reasoner_diagnostics",
-                    None,
-                ),
-                final_temporal_assessment=getattr(
-                    bundle,
-                    "final_temporal_assessment",
-                    None,
-                ),
             ),
         )
 
@@ -514,11 +549,14 @@ class MyUniSentimentPipeline:
                 content_kind=content_kind,  # type: ignore[arg-type]
                 extra=extra,  # type: ignore[arg-type]
             ),
-            analysis=AnalysisBlock(
-                overall=fusion.overall,
-                modalities=ModalityBundle(text=evidence),
-                fusion=fusion.diagnostics,
-                runtime=build_poc_runtime_info(self),
+            analysis=self._with_wellbeing_shadow(
+                AnalysisBlock(
+                    overall=fusion.overall,
+                    modalities=ModalityBundle(text=evidence),
+                    fusion=fusion.diagnostics,
+                    runtime=build_poc_runtime_info(self),
+                ),
+                primary_text=cleaned,
             ),
         )
 
@@ -529,6 +567,7 @@ class MyUniSentimentPipeline:
         caption_evidence = None
         caption_preview = None
         caption_length = None
+        cleaned_caption: Optional[str] = None
         if activity.text:
             cleaned_caption = self._text_analyzer.validate_text(activity.text)
             caption_evidence = self._text_analyzer.analyze(cleaned_caption)
@@ -584,13 +623,17 @@ class MyUniSentimentPipeline:
                 content_kind=activity.content_kind,
                 extra=activity.metadata,
             ),
-            analysis=AnalysisBlock(
-                overall=fusion.overall,
-                modalities=modalities,
-                fusion=fusion.diagnostics,
-                runtime=build_poc_runtime_info(self),
-                warnings=list(image_evidence.warnings),
-                ocr_text=image_evidence.ocr_text,
+            analysis=self._with_wellbeing_shadow(
+                AnalysisBlock(
+                    overall=fusion.overall,
+                    modalities=modalities,
+                    fusion=fusion.diagnostics,
+                    runtime=build_poc_runtime_info(self),
+                    warnings=list(image_evidence.warnings),
+                    ocr_text=image_evidence.ocr_text,
+                ),
+                # Caption only — OCR excluded from personal wellbeing shadow.
+                caption=cleaned_caption,
             ),
         )
 
@@ -601,6 +644,7 @@ class MyUniSentimentPipeline:
         caption_evidence = None
         caption_preview = None
         caption_length = None
+        cleaned_caption: Optional[str] = None
         if activity.text:
             cleaned_caption = self._text_analyzer.validate_text(activity.text)
             caption_evidence = self._text_analyzer.analyze(cleaned_caption)
@@ -656,32 +700,37 @@ class MyUniSentimentPipeline:
                 content_kind=activity.content_kind,
                 extra=activity.metadata,
             ),
-            analysis=AnalysisBlock(
-                overall=fusion.overall,
-                modalities=ModalityBundle(
-                    text=caption_evidence,
-                    visual=bundle.visual,
-                    ocr=bundle.ocr,
-                    speech=bundle.speech,
+            analysis=self._with_wellbeing_shadow(
+                AnalysisBlock(
+                    overall=fusion.overall,
+                    modalities=ModalityBundle(
+                        text=caption_evidence,
+                        visual=bundle.visual,
+                        ocr=bundle.ocr,
+                        speech=bundle.speech,
+                    ),
+                    fusion=fusion.diagnostics,
+                    runtime=build_poc_runtime_info(self),
+                    warnings=list(bundle.warnings),
+                    ocr_text=bundle.ocr_text,
+                    transcript=bundle.transcript,
+                    video=bundle.diagnostics,
+                    temporal_context=bundle.temporal_context,
+                    deterministic_context=getattr(bundle, "deterministic_context", None),
+                    temporal_reasoning=getattr(bundle, "temporal_reasoning", None),
+                    temporal_reasoner_diagnostics=getattr(
+                        bundle,
+                        "temporal_reasoner_diagnostics",
+                        None,
+                    ),
+                    final_temporal_assessment=getattr(
+                        bundle,
+                        "final_temporal_assessment",
+                        None,
+                    ),
                 ),
-                fusion=fusion.diagnostics,
-                runtime=build_poc_runtime_info(self),
-                warnings=list(bundle.warnings),
-                ocr_text=bundle.ocr_text,
+                caption=cleaned_caption,
                 transcript=bundle.transcript,
-                video=bundle.diagnostics,
                 temporal_context=bundle.temporal_context,
-                deterministic_context=getattr(bundle, "deterministic_context", None),
-                temporal_reasoning=getattr(bundle, "temporal_reasoning", None),
-                temporal_reasoner_diagnostics=getattr(
-                    bundle,
-                    "temporal_reasoner_diagnostics",
-                    None,
-                ),
-                final_temporal_assessment=getattr(
-                    bundle,
-                    "final_temporal_assessment",
-                    None,
-                ),
             ),
         )

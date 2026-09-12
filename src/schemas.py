@@ -7,6 +7,8 @@ from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from src.wellbeing.schemas import WellbeingShadowAnalysis
+
 
 SentimentLabel = Literal["positive", "neutral", "negative"]
 ActivityType = Literal["text", "image", "video", "audio"]
@@ -223,6 +225,13 @@ class AnalysisBlock(BaseModel):
         description=(
             "Client-facing VIDEO temporal assessment (categorical wellbeing "
             "indicator + highlights). Not a clinical score."
+        ),
+    )
+    wellbeing_shadow: Optional[WellbeingShadowAnalysis] = Field(
+        default=None,
+        description=(
+            "Phase 4B non-authoritative DeBERTa wellbeing shadow evidence. "
+            "Does not alter FinalTemporalAssessment or sentiment."
         ),
     )
 

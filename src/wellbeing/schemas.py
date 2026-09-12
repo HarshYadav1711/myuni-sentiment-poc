@@ -10,7 +10,7 @@ Phase 4A.5:
 
 from __future__ import annotations
 
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -263,6 +263,95 @@ class WellbeingClassificationResult(BaseModel):
     )
     error_code: Optional[str] = Field(default=None)
     error_message: Optional[str] = Field(default=None)
+
+
+# ---------------------------------------------------------------------------
+# Phase 4B — shadow-mode pipeline evidence (non-authoritative)
+# ---------------------------------------------------------------------------
+
+WellbeingShadowStatus = Literal[
+    "ok",
+    "partial",
+    "insufficient_text",
+    "classifier_unavailable",
+    "error",
+]
+
+ShadowSourceRole = Literal[
+    "primary_text",
+    "caption",
+    "transcript",
+    "speech_window",
+]
+
+
+class WellbeingShadowSourceResult(BaseModel):
+    """One classified textual source in shadow mode. No raw text stored."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_role: ShadowSourceRole
+    classification: Optional[WellbeingClassificationResult] = None
+    input_character_count: int = 0
+    provenance: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Non-text provenance (ids/indexes only).",
+    )
+
+
+class WellbeingShadowWindowResult(BaseModel):
+    """Per-window shadow classification. No speech text stored."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    window_index: int
+    start: float
+    end: float
+    classification: Optional[WellbeingClassificationResult] = None
+    input_character_count: int = 0
+    usable_window: bool = False
+
+
+class WellbeingShadowSummary(BaseModel):
+    """Descriptive evidence counts only — not a wellbeing score."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    evaluated_source_count: int = 0
+    eligible_source_count: int = 0
+    uncertain_source_count: int = 0
+    not_eligible_source_count: int = 0
+    selected_signal_counts: dict[str, int] = Field(default_factory=dict)
+    evaluated_window_count: int = 0
+    eligible_window_count: int = 0
+    uncertain_window_count: int = 0
+    not_eligible_window_count: int = 0
+    items_submitted: int = 0
+    windows_submitted: int = 0
+
+
+class WellbeingShadowAnalysis(BaseModel):
+    """Parallel non-authoritative wellbeing classifier evidence (Phase 4B).
+
+    Does not alter FinalTemporalAssessment, sentiment, fusion, or the
+    existing temporal wellbeing gate.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["shadow"] = "shadow"
+    status: WellbeingShadowStatus = "insufficient_text"
+    model_id: Optional[str] = None
+    source_results: list[WellbeingShadowSourceResult] = Field(default_factory=list)
+    window_results: list[WellbeingShadowWindowResult] = Field(default_factory=list)
+    summary: WellbeingShadowSummary = Field(default_factory=WellbeingShadowSummary)
+    processing_seconds: Optional[float] = None
+    affects_final_assessment: Literal[False] = False
+    note: str = (
+        "Shadow evidence only. Does not alter client-facing wellbeing "
+        "indicator, sentiment, fusion, or temporal assessment."
+    )
+    error_code: Optional[str] = None
 
 
 EXPECTED_RELEVANCE_LABELS = RELEVANCE_LABELS

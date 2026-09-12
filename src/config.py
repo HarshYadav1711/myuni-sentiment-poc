@@ -187,6 +187,10 @@ WELLBEING_REPORTED_OTHER_BLOCK_SCORE = 0.55
 WELLBEING_ATTRIBUTION_MIN_MARGIN = 0.0
 WELLBEING_ATTRIBUTION_MIN_TOP_SCORE = 0.0
 
+# Phase 4B: shadow-mode pipeline integration (default OFF — CPU DeBERTa is expensive).
+# When False, the pipeline must not load or call the wellbeing classifier.
+WELLBEING_SHADOW_ENABLED = False
+
 # RoBERTa max sequence length; longer transcripts are chunked (not silently truncated).
 TEXT_MAX_LENGTH = 512
 TEXT_CHUNK_SIZE = 480
@@ -676,3 +680,17 @@ DEFAULT_TEMPORAL_REASONER = TemporalReasonerConfig(
     max_new_tokens=OPENROUTER_REASONER_MAX_TOKENS,
 )
 DEFAULT_WELLBEING_CLASSIFIER = WellbeingClassifierConfig()
+
+
+def resolve_wellbeing_shadow_enabled(
+    *,
+    override: Optional[bool] = None,
+) -> bool:
+    """Return whether Phase 4B wellbeing shadow mode is enabled.
+
+    Default False. Environment: ``WELLBEING_SHADOW_ENABLED``.
+    Does not change ``WELLBEING_CLASSIFIER_ENABLED`` semantics.
+    """
+    if override is not None:
+        return bool(override)
+    return _env_bool("WELLBEING_SHADOW_ENABLED", WELLBEING_SHADOW_ENABLED)
