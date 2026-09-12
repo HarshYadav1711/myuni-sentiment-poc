@@ -5,6 +5,9 @@ Do not scatter hidden prompts across other modules.
 
 Labels describe LANGUAGE / EVIDENCE IN CONTENT — not diagnoses,
 not clinical conditions, and not inferred internal mental states.
+
+Phase 4A.2: verbalizations rewritten for clearer personal vs topic,
+self vs other, and explicit-evidence signal semantics.
 """
 
 from __future__ import annotations
@@ -24,43 +27,51 @@ RELEVANCE_LABELS: Final[tuple[str, ...]] = (
 
 RELEVANCE_DEFINITIONS: Final[Mapping[str, str]] = {
     "personal_wellbeing": (
-        "The speaker/author is expressing information about their own current "
-        "or recent wellbeing, stress, emotional difficulty, coping or recovery."
+        "The author is explicitly describing their own current or recent "
+        "wellbeing, stress, emotional difficulty, coping, or recovery."
     ),
     "wellbeing_topic_only": (
-        "The content discusses wellbeing, mental health, stress, burnout, "
-        "coping or related issues but does not clearly express the author's "
-        "own wellbeing state."
+        "The text discusses wellbeing, stress, mental health, coping, or "
+        "another person's wellbeing without clearly describing the author's "
+        "own wellbeing."
     ),
-    "not_wellbeing_related": "No meaningful personal-wellbeing content.",
+    "not_wellbeing_related": (
+        "The text is not meaningfully about a person's wellbeing, stress, "
+        "coping, recovery, or emotional difficulty."
+    ),
     "ambiguous": (
-        "The available text is insufficient or unclear regarding wellbeing "
-        "relevance."
+        "It is unclear whether the text describes the author's personal "
+        "wellbeing rather than figurative, casual, quoted, or general "
+        "discussion."
     ),
 }
 
 # Human-readable NLI candidates (NOT raw label IDs).
 RELEVANCE_CANDIDATES: Final[Mapping[str, str]] = {
     "personal_wellbeing": (
-        "the author expressing their own current or recent wellbeing, stress, "
-        "emotional difficulty, coping, or recovery"
+        "the author explicitly describing their own current or recent "
+        "wellbeing, stress, emotional difficulty, coping, or recovery"
     ),
     "wellbeing_topic_only": (
-        "a discussion of wellbeing, mental health, stress, burnout, or coping "
-        "as a topic without the author clearly describing their own wellbeing"
+        "a discussion of wellbeing, stress, mental health, coping, or "
+        "another person's wellbeing without clearly describing the author's "
+        "own wellbeing"
     ),
     "not_wellbeing_related": (
-        "content with no meaningful personal-wellbeing relevance"
+        "text that is not meaningfully about a person's wellbeing, stress, "
+        "coping, recovery, or emotional difficulty"
     ),
     "ambiguous": (
-        "text that is unclear or insufficient to judge wellbeing relevance"
+        "unclear whether the text describes the author's personal wellbeing "
+        "rather than figurative, casual, quoted, or general discussion"
     ),
 }
 
-RELEVANCE_HYPOTHESIS_TEMPLATE: Final[str] = "This text is about {}."
+RELEVANCE_HYPOTHESIS_TEMPLATE: Final[str] = "This text is best described as: {}."
 
 # ---------------------------------------------------------------------------
 # Target — exclusive (multi_label=False)
+# Whose wellbeing experience is being described?
 # ---------------------------------------------------------------------------
 
 TARGET_LABELS: Final[tuple[str, ...]] = (
@@ -72,38 +83,59 @@ TARGET_LABELS: Final[tuple[str, ...]] = (
 )
 
 TARGET_DEFINITIONS: Final[Mapping[str, str]] = {
-    "self": "Expression is substantially about the speaker/author.",
+    "self": (
+        "The wellbeing experience being described belongs primarily to the "
+        "author or speaker."
+    ),
     "other_person": (
-        "Expression describes another identifiable or referenced person."
+        "The wellbeing experience being described belongs primarily to "
+        "another person, not the author or speaker."
     ),
     "group_or_community": (
-        "Expression concerns a group/community rather than specifically the "
-        "speaker."
+        "The wellbeing experience being described belongs primarily to a "
+        "group or community."
     ),
     "institution_or_event": (
-        "Content is mainly about an institution, situation, event, news item, "
-        "media content, class, university, etc."
+        "The text mainly discusses an institution, event, situation, class, "
+        "exam, or topic and does not primarily describe a person's wellbeing "
+        "experience."
     ),
-    "general_or_unknown": "Target cannot be reliably determined.",
+    "general_or_unknown": (
+        "No clear person or group can reliably be identified as the subject "
+        "of the wellbeing experience."
+    ),
 }
 
 TARGET_CANDIDATES: Final[Mapping[str, str]] = {
-    "self": "the speaker or author themselves",
-    "other_person": "another specific person other than the speaker",
-    "group_or_community": "a group or community rather than the speaker alone",
-    "institution_or_event": (
-        "an institution, event, news item, class, university, or similar "
-        "situation"
+    "self": (
+        "a wellbeing experience that belongs primarily to the author or "
+        "speaker themselves"
     ),
-    "general_or_unknown": "an unclear or undetermined target",
+    "other_person": (
+        "a wellbeing experience that belongs primarily to another person, "
+        "not the author or speaker"
+    ),
+    "group_or_community": (
+        "a wellbeing experience that belongs primarily to a group or "
+        "community"
+    ),
+    "institution_or_event": (
+        "mainly an institution, event, situation, class, exam, or topic "
+        "without primarily describing a person's wellbeing experience"
+    ),
+    "general_or_unknown": (
+        "no clear person or group as the subject of a wellbeing experience"
+    ),
 }
 
 TARGET_HYPOTHESIS_TEMPLATE: Final[str] = (
-    "The main target of this expression is {}."
+    "Regarding whose wellbeing experience is being described, this text is "
+    "best described as: {}."
 )
 
 # ---------------------------------------------------------------------------
 # Expressed signals — multi-label (multi_label=True)
+# Require EXPLICIT expressed evidence; not generic negativity.
 # ---------------------------------------------------------------------------
 
 SIGNAL_LABELS: Final[tuple[str, ...]] = (
@@ -120,73 +152,179 @@ SIGNAL_LABELS: Final[tuple[str, ...]] = (
 
 SIGNAL_DEFINITIONS: Final[Mapping[str, str]] = {
     "stress_or_overwhelm": (
-        "Language expressing stress or feeling overwhelmed (content evidence, "
-        "not a diagnosis)."
+        "The author explicitly describes feeling stressed, overwhelmed, "
+        "under pressure, or unable to cope (content evidence, not a diagnosis)."
     ),
     "anxiety_or_fear_language": (
-        "Language using anxiety- or fear-related wording (content evidence, "
-        "not an anxiety disorder)."
+        "The author explicitly describes feeling afraid, worried, anxious, "
+        "panicked, or fearful (content evidence, not an anxiety disorder)."
     ),
     "loneliness_or_isolation": (
-        "Language expressing loneliness or social isolation (content evidence)."
+        "The author explicitly describes feeling lonely, isolated, excluded, "
+        "or without support (content evidence)."
     ),
     "hopelessness_like_language": (
-        "Language resembling hopelessness or giving-up wording (content "
+        "The author explicitly expresses hopelessness, giving up, or a belief "
+        "that things will not improve about their own experience (content "
         "evidence, not a clinical judgment)."
     ),
     "exhaustion_or_burnout_like_language": (
-        "Language resembling exhaustion or burnout (content evidence, not a "
-        "diagnosis)."
+        "The author explicitly describes feeling exhausted, burned out, "
+        "drained, or unable to continue because of fatigue (content evidence)."
     ),
     "self_directed_negativity": (
-        "Language expressing negative self-evaluation by the author "
-        "(content evidence)."
+        "The author explicitly criticizes or devalues themself, their worth, "
+        "their abilities, or their identity (not generic dislike of media or "
+        "objects)."
     ),
     "interpersonal_distress": (
-        "Language about interpersonal conflict or relationship distress "
-        "(content evidence)."
+        "The author explicitly describes personal distress caused by "
+        "conflict, rejection, breakup, bullying, or relationship problems."
     ),
     "academic_pressure": (
-        "Language about academic pressure, exams, coursework, or study load "
-        "(content evidence)."
+        "The author explicitly describes their own stress or pressure related "
+        "to exams, grades, assignments, deadlines, studies, or academic "
+        "workload."
     ),
     "positive_wellbeing_or_recovery": (
-        "Language expressing improving wellbeing, coping success, or recovery "
-        "(content evidence)."
+        "The author explicitly describes their wellbeing improving, coping "
+        "better, recovering, resting, or feeling more stable."
     ),
 }
 
 SIGNAL_CANDIDATES: Final[Mapping[str, str]] = {
     "stress_or_overwhelm": (
-        "language expressing stress or feeling overwhelmed"
+        "the author explicitly describing feeling stressed, overwhelmed, "
+        "under pressure, or unable to cope"
     ),
     "anxiety_or_fear_language": (
-        "language using anxiety-related or fear-related wording"
+        "the author explicitly describing feeling afraid, worried, anxious, "
+        "panicked, or fearful"
     ),
     "loneliness_or_isolation": (
-        "language expressing loneliness or social isolation"
+        "the author explicitly describing feeling lonely, isolated, "
+        "excluded, or without support"
     ),
     "hopelessness_like_language": (
-        "language resembling hopelessness or giving up"
+        "the author explicitly expressing hopelessness, giving up, or a "
+        "belief that things will not improve about their own experience"
     ),
     "exhaustion_or_burnout_like_language": (
-        "language resembling exhaustion or burnout"
+        "the author explicitly describing feeling exhausted, burned out, "
+        "drained, or unable to continue because of fatigue"
     ),
     "self_directed_negativity": (
-        "language expressing negative self-evaluation by the author"
+        "the author explicitly criticizing or devaluing themself, their "
+        "worth, their abilities, or their identity"
     ),
     "interpersonal_distress": (
-        "language about interpersonal conflict or relationship distress"
+        "the author explicitly describing personal distress caused by "
+        "conflict, rejection, breakup, bullying, or relationship problems"
     ),
     "academic_pressure": (
-        "language about academic pressure, exams, coursework, or study load"
+        "the author explicitly describing their own stress or pressure "
+        "related to exams, grades, assignments, deadlines, studies, or "
+        "academic workload"
     ),
     "positive_wellbeing_or_recovery": (
-        "language expressing improving wellbeing, coping success, or recovery"
+        "the author explicitly describing their wellbeing improving, coping "
+        "better, recovering, resting, or feeling more stable"
     ),
 }
 
-SIGNAL_HYPOTHESIS_TEMPLATE: Final[str] = "This text contains {}."
+SIGNAL_HYPOTHESIS_TEMPLATE: Final[str] = "This text contains evidence of {}."
+
+# ---------------------------------------------------------------------------
+# Dual-head attribution evidence (Phase 4A.5) — independent multi_label=True
+# Run ONLY when relevance==personal_wellbeing AND target==self.
+#
+# Two independent semantic questions (not forced exclusive):
+# A) direct_self_experience
+# B) reported_other_experience
+#
+# Policy derives final_label: self_experience | not_self_experience | unclear.
+# ---------------------------------------------------------------------------
+
+DUAL_ATTRIBUTION_LABELS: Final[tuple[str, ...]] = (
+    "direct_self_experience",
+    "reported_other_experience",
+)
+
+DUAL_ATTRIBUTION_DEFINITIONS: Final[Mapping[str, str]] = {
+    "direct_self_experience": (
+        "The author or speaker is directly describing their own wellbeing, "
+        "stress, coping, emotional difficulty, or recovery."
+    ),
+    "reported_other_experience": (
+        "The text reports, quotes, paraphrases, or describes another person's "
+        "wellbeing experience rather than the author's own experience."
+    ),
+}
+
+DUAL_ATTRIBUTION_CANDIDATES: Final[Mapping[str, str]] = {
+    "direct_self_experience": (
+        "the author or speaker directly describing their own wellbeing, "
+        "stress, coping, emotional difficulty, or recovery"
+    ),
+    "reported_other_experience": (
+        "the text reporting, quoting, paraphrasing, or describing another "
+        "person's wellbeing experience rather than the author's own experience"
+    ),
+}
+
+DUAL_ATTRIBUTION_HYPOTHESIS_TEMPLATE: Final[str] = "This text contains evidence of {}."
+
+# Independent entailment-style evidence (not forced self vs not-self).
+DUAL_ATTRIBUTION_MULTI_LABEL: Final[bool] = True
+
+# Final/policy attribution outcomes (may include policy-derived unclear).
+FINAL_ATTRIBUTION_LABELS: Final[tuple[str, ...]] = (
+    "self_experience",
+    "not_self_experience",
+    "unclear",
+)
+
+# ---------------------------------------------------------------------------
+# LEGACY binary attribution (Phase 4A.4) — evaluation/comparison only
+# Kept for latency / quality comparison. Must NOT drive production eligibility.
+# ---------------------------------------------------------------------------
+
+RAW_ATTRIBUTION_LABELS: Final[tuple[str, ...]] = (
+    "self_experience",
+    "not_self_experience",
+)
+
+# Back-compat alias.
+ATTRIBUTION_LABELS: Final[tuple[str, ...]] = RAW_ATTRIBUTION_LABELS
+
+ATTRIBUTION_DEFINITIONS: Final[Mapping[str, str]] = {
+    "self_experience": (
+        "The person experiencing the wellbeing state described in the text "
+        "is the author or speaker themself."
+    ),
+    "not_self_experience": (
+        "The person experiencing the wellbeing state described in the text "
+        "is someone other than the author or speaker."
+    ),
+}
+
+ATTRIBUTION_CANDIDATES: Final[Mapping[str, str]] = {
+    "self_experience": (
+        "the person experiencing the wellbeing state described in the text "
+        "is the author or speaker themself"
+    ),
+    "not_self_experience": (
+        "the person experiencing the wellbeing state described in the text "
+        "is someone other than the author or speaker"
+    ),
+}
+
+ATTRIBUTION_HYPOTHESIS_TEMPLATE: Final[str] = (
+    "Regarding who is experiencing the described wellbeing state, {}."
+)
+
+# Legacy exclusive binary mode (comparison only).
+ATTRIBUTION_MULTI_LABEL: Final[bool] = False
 
 # Forbidden diagnosis-style identifiers (must never appear as classifier labels).
 FORBIDDEN_DIAGNOSIS_LABELS: Final[frozenset[str]] = frozenset(

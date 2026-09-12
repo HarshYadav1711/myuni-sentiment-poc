@@ -172,6 +172,20 @@ WELLBEING_SIGNAL_POC_THRESHOLD = 0.5
 WELLBEING_CLASSIFIER_MIN_CHARS = 12
 # Soft character cap before truncation (model still token-limits internally).
 WELLBEING_CLASSIFIER_MAX_CHARS = 2000
+# Conservative CPU batch size for classify_many (memory-safe default).
+WELLBEING_CLASSIFIER_BATCH_SIZE = 4
+# POC eligibility margin floors (calibrated on development/calibration cases).
+# A–K, calibration, attribution_dev, and previous FH40 are regression/development
+# (contaminated). Fresh evaluation uses final_holdout_v2.py once after freeze.
+WELLBEING_RELEVANCE_MIN_MARGIN = 0.0
+WELLBEING_TARGET_MIN_MARGIN = 0.0
+# Dual-head attribution policy thresholds (Phase 4A.5). Placeholder until
+# calibrate_margins.py freezes values from development data only.
+WELLBEING_DIRECT_SELF_MIN_SCORE = 0.35
+WELLBEING_REPORTED_OTHER_BLOCK_SCORE = 0.55
+# Legacy binary gates retained for comparison tooling only (not production).
+WELLBEING_ATTRIBUTION_MIN_MARGIN = 0.0
+WELLBEING_ATTRIBUTION_MIN_TOP_SCORE = 0.0
 
 # RoBERTa max sequence length; longer transcripts are chunked (not silently truncated).
 TEXT_MAX_LENGTH = 512
@@ -523,6 +537,13 @@ class WellbeingClassifierConfig:
     signal_poc_threshold: float = WELLBEING_SIGNAL_POC_THRESHOLD
     min_chars: int = WELLBEING_CLASSIFIER_MIN_CHARS
     max_chars: int = WELLBEING_CLASSIFIER_MAX_CHARS
+    batch_size: int = WELLBEING_CLASSIFIER_BATCH_SIZE
+    relevance_min_margin: float = WELLBEING_RELEVANCE_MIN_MARGIN
+    target_min_margin: float = WELLBEING_TARGET_MIN_MARGIN
+    direct_self_min_score: float = WELLBEING_DIRECT_SELF_MIN_SCORE
+    reported_other_block_score: float = WELLBEING_REPORTED_OTHER_BLOCK_SCORE
+    attribution_min_margin: float = WELLBEING_ATTRIBUTION_MIN_MARGIN
+    attribution_min_top_score: float = WELLBEING_ATTRIBUTION_MIN_TOP_SCORE
 
     def __post_init__(self) -> None:
         if not (0.0 <= self.signal_poc_threshold <= 1.0):
@@ -531,6 +552,19 @@ class WellbeingClassifierConfig:
             raise ValueError("min_chars must be >= 1")
         if self.max_chars < self.min_chars:
             raise ValueError("max_chars must be >= min_chars")
+        if self.batch_size < 1:
+            raise ValueError("batch_size must be >= 1")
+        for name in (
+            "relevance_min_margin",
+            "target_min_margin",
+            "direct_self_min_score",
+            "reported_other_block_score",
+            "attribution_min_margin",
+            "attribution_min_top_score",
+        ):
+            value = float(getattr(self, name))
+            if not (0.0 <= value <= 1.0):
+                raise ValueError(f"{name} must be in [0, 1]")
         model = (self.model_id or "").strip()
         if not model:
             raise ValueError("model_id must be non-empty")
@@ -566,6 +600,10 @@ def resolve_wellbeing_classifier_config(
     - ``WELLBEING_CLASSIFIER_ENABLED`` (default true)
     - ``WELLBEING_CLASSIFIER_MODEL`` (local HF model id only)
     - ``WELLBEING_SIGNAL_POC_THRESHOLD`` (provisional; not clinically validated)
+    - ``WELLBEING_CLASSIFIER_BATCH_SIZE`` (CPU classify_many chunk size)
+    - ``WELLBEING_RELEVANCE_MIN_MARGIN`` / ``WELLBEING_TARGET_MIN_MARGIN`` /
+      ``WELLBEING_DIRECT_SELF_MIN_SCORE`` /
+      ``WELLBEING_REPORTED_OTHER_BLOCK_SCORE`` (POC dual-head attribution)
 
     No environment variable may redirect inference to an external API.
     """
@@ -580,6 +618,17 @@ def resolve_wellbeing_classifier_config(
     threshold = WELLBEING_SIGNAL_POC_THRESHOLD
     if threshold_raw is not None and str(threshold_raw).strip():
         threshold = float(threshold_raw)
+    batch_raw = os.environ.get("WELLBEING_CLASSIFIER_BATCH_SIZE")
+    batch_size = WELLBEING_CLASSIFIER_BATCH_SIZE
+    if batch_raw is not None and str(batch_raw).strip():
+        batch_size = int(batch_raw)
+
+    def _margin(name: str, default: float) -> float:
+        raw = os.environ.get(name)
+        if raw is not None and str(raw).strip():
+            return float(raw)
+        return default
+
     kwargs: dict[str, Any] = {
         "enabled": _env_bool(
             "WELLBEING_CLASSIFIER_ENABLED",
@@ -589,6 +638,31 @@ def resolve_wellbeing_classifier_config(
         "signal_poc_threshold": threshold,
         "min_chars": WELLBEING_CLASSIFIER_MIN_CHARS,
         "max_chars": WELLBEING_CLASSIFIER_MAX_CHARS,
+        "batch_size": batch_size,
+        "relevance_min_margin": _margin(
+            "WELLBEING_RELEVANCE_MIN_MARGIN",
+            WELLBEING_RELEVANCE_MIN_MARGIN,
+        ),
+        "target_min_margin": _margin(
+            "WELLBEING_TARGET_MIN_MARGIN",
+            WELLBEING_TARGET_MIN_MARGIN,
+        ),
+        "direct_self_min_score": _margin(
+            "WELLBEING_DIRECT_SELF_MIN_SCORE",
+            WELLBEING_DIRECT_SELF_MIN_SCORE,
+        ),
+        "reported_other_block_score": _margin(
+            "WELLBEING_REPORTED_OTHER_BLOCK_SCORE",
+            WELLBEING_REPORTED_OTHER_BLOCK_SCORE,
+        ),
+        "attribution_min_margin": _margin(
+            "WELLBEING_ATTRIBUTION_MIN_MARGIN",
+            WELLBEING_ATTRIBUTION_MIN_MARGIN,
+        ),
+        "attribution_min_top_score": _margin(
+            "WELLBEING_ATTRIBUTION_MIN_TOP_SCORE",
+            WELLBEING_ATTRIBUTION_MIN_TOP_SCORE,
+        ),
     }
     if overrides:
         kwargs.update(dict(overrides))

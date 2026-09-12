@@ -56,6 +56,10 @@ htmlcov/
 outputs/*
 !outputs/.gitkeep
 
+# Generated wellbeing evaluation artifacts (reproducible via calibrate_margins)
+evaluation/wellbeing/_phase4a5_report.json
+evaluation/wellbeing/_checkpoints/
+
 # Local SQLite POC databases
 *.db
 *.sqlite

@@ -137,11 +137,75 @@ Zero-shot NLI scores are **model evidence**. They are:
 
 ### Provisional signal threshold
 
-`WELLBEING_SIGNAL_POC_THRESHOLD` (default `0.5`) controls which multi-label
-signals are marked `selected=true`.
+`WELLBEING_SIGNAL_POC_THRESHOLD` (default `0.5`) controls
+``threshold_passed`` on each signal.
 
 **This threshold is provisional and must be calibrated against an in-domain
 validation set.** It is not clinically validated.
+
+### Self-attribution dual evidence (Phase 4A.5)
+
+Production attribution uses **two independent** zero-shot heads with
+``multi_label=True``:
+
+1. ``direct_self_experience`` — author describing their own wellbeing
+2. ``reported_other_experience`` — quoted / reported / other-person experience
+
+Policy derives ``self_experience`` / ``not_self_experience`` / ``unclear``:
+
+- self when ``direct_self >= DIRECT_SELF_MIN_SCORE`` and
+  ``reported_other < REPORTED_OTHER_BLOCK_SCORE``
+- not-self when reported-other meets the block score and direct-self is
+  insufficient
+- unclear on conflict (both strong) or insufficient evidence
+
+**Mixed self+other:** strong evidence on both heads prefers ``unclear``
+rather than auto-blocking solely because other-person evidence exists.
+
+Legacy exclusive binary attribution (``multi_label=False``) is retained for
+evaluation comparison only and must not drive eligibility.
+
+``selected=true`` only when ``eligibility_status == eligible`` AND
+``threshold_passed``.
+
+**Dataset roles:**
+
+- ``calibration_cases.py`` — development/calibration (fit policy)
+- ``attribution_dev_cases.py`` — attribution-focused development coverage
+- A–K fixtures — regression/development (contaminated)
+- ``final_holdout_cases.py`` (FH40) — NOW also development/regression
+  (failures influenced this design; not unbiased)
+- ``final_holdout_v2.py`` — fresh holdout, evaluated once after freeze
+
+Thresholds (frozen from development calibration, Phase 4A.5):
+
+- ``WELLBEING_RELEVANCE_MIN_MARGIN`` = ``0.0``
+- ``WELLBEING_TARGET_MIN_MARGIN`` = ``0.0``
+- ``WELLBEING_DIRECT_SELF_MIN_SCORE`` = ``0.35``
+- ``WELLBEING_REPORTED_OTHER_BLOCK_SCORE`` = ``0.55``
+
+Conflict rule: if ``direct_self >= self_min`` AND
+``reported_other >= other_block`` → ``unclear`` (prefer abstention).
+
+### Conservative personal selection
+
+Raw scores are always retained.
+
+``selected=true`` only when:
+
+1. ``threshold_passed``
+2. ``eligibility_status == eligible``
+
+Topic-only / other-person / quoted-other cases may still show high raw
+signal scores, but those signals are **not** selected personal-wellbeing
+evidence.
+### Batched classification
+
+``WellbeingClassifier.classify_many(texts)`` runs relevance, target, and
+signals over usable inputs, with ``WELLBEING_CLASSIFIER_BATCH_SIZE``
+(default 4) for CPU memory safety. Dual attribution runs only for
+``personal_wellbeing`` + ``self`` candidates. ``classify()`` remains a thin
+wrapper.
 
 ## Config
 
