@@ -12,13 +12,20 @@ from src.wellbeing.classifier import (
     classify_wellbeing,
     get_wellbeing_classifier,
 )
-from src.wellbeing.schemas import WellbeingClassificationResult, WellbeingShadowAnalysis
+from src.wellbeing.evidence import build_wellbeing_evidence_context
+from src.wellbeing.schemas import (
+    WellbeingClassificationResult,
+    WellbeingEvidenceContext,
+    WellbeingShadowAnalysis,
+)
 from src.wellbeing.shadow import build_wellbeing_shadow
 
 __all__ = [
     "WellbeingClassifier",
     "WellbeingClassificationResult",
+    "WellbeingEvidenceContext",
     "WellbeingShadowAnalysis",
+    "build_wellbeing_evidence_context",
     "build_wellbeing_shadow",
     "classify_wellbeing",
     "get_wellbeing_classifier",

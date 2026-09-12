@@ -327,6 +327,96 @@ Use shadow evidence from controlled live runs to decide whether (and how)
 classifier outputs may later inform the wellbeing gate — still without
 conflating sentiment polarity with wellbeing.
 
+## Phase 4C.1 — deterministic wellbeing evidence aggregation
+
+Phase 4C.1 adds a **pure post-processing evidence feature layer** over
+already-produced Phase 4B shadow classifications.
+
+- **No new model inference**
+- **No concern category** (`low_concern` / `moderate_concern` / `high_concern`)
+- **No numerical wellbeing / mental-health score**
+- **Does not replace** `compute_wellbeing_indicator()` or change
+  `overall_wellbeing_indicator`
+- Attached optionally as `WellbeingShadowAnalysis.evidence_context`
+
+Implementation: `src/wellbeing/evidence.py` →
+`build_wellbeing_evidence_context(...)`.
+
+### Global vs local evidence roles
+
+Global transcript / primary text / caption and local speech windows are
+**not equivalent votes**.
+
+| Role | Purpose |
+| --- | --- |
+| **Global** | Authorship, context, whole-content semantics |
+| **Windows** | Temporal localization, recurrence, transitions |
+
+Do **not** majority-vote `1 global + N windows` as `N+1` equal ballots.
+Do **not** average relevance scores or signal probabilities across sources.
+
+### Why windows are not independent votes
+
+A five-second fragment and a full transcript answer different questions.
+Windows measure **where / how often / whether runs recur**. Global
+classification measures **overall authored meaning**. Treating them as
+votes collapses that distinction.
+
+### Why signal probabilities are not averaged
+
+Selected-signal **presence across independently classified eligible
+windows** is the temporal evidence. Averaging raw DeBERTa scores would
+invent a pseudo-severity the model does not provide.
+
+### Temporal recurrence vs severity
+
+Eligible-run length and `eligible_window_fraction` are **descriptive
+recurrence features**, not severity. Phase 4C.1 does **not** label a run
+“persistent distress” merely because it has length N. Policy semantics
+belong in Phase 4C.2.
+
+### Recovery evidence
+
+`positive_wellbeing_or_recovery` is first-class. Recovery windows are
+counted separately from distress-like language signals. Mixed eligible
+windows (recovery **and** distress-like selected) are counted as
+`mixed_signal_window` — signals are preserved, not averaged away.
+
+### Conflicts / diagnostics
+
+Machine-readable disagreement codes only (not resolved yet), e.g.:
+
+- `global_eligible_no_local_support`
+- `local_eligible_without_global_eligibility`
+- `global_recovery_local_distress`
+- `global_distress_local_recovery`
+
+### Why visual sentiment is excluded
+
+Faces / SigLIP / frame sentiment are **not** personal-wellbeing evidence.
+Observable visual negativity must not silently become inferred internal
+wellbeing.
+
+### Why multimodal temporal negativity is excluded
+
+`TemporalFeatures.negative_persistence`, `trajectory`, and combined
+`negative_probability` remain **sentiment / temporal context**. They must
+**not** become hidden inputs to wellbeing policy. Phase 4C.1 reads only
+`WellbeingShadowAnalysis` classification fields (plus window
+index/start/end provenance).
+
+### Why no concern level yet
+
+This phase ships an inspectable evidence context for Phase 4C.2 policy
+design. Concern thresholds, priority rules, and client mapping are
+intentionally deferred.
+
+### Input to Phase 4C.2
+
+Phase 4C.2 should consume `WellbeingEvidenceContext` (global + temporal
+evidence, eligible runs, signal recurrence, recovery/distress/mixed
+counts, conflict diagnostics) — not raw multimodal sentiment features.
+
 ## Why OpenRouter is not the authority for classifier labels
 
 OpenRouter is used for **contextual temporal reasoning** over structured
@@ -344,6 +434,8 @@ labels.
 - Signal threshold remains provisional (0.5)
 - Shadow mode is non-authoritative (Phase 4B) — does not feed
   `compute_wellbeing_indicator()` or `FinalTemporalAssessment`
+- Evidence aggregation (Phase 4C.1) is non-authoritative and produces no
+  concern category or wellbeing score
 - No multimodal / facial / OCR personal-attribution path (by design)
 - Ordinary unit tests mock the classifier; no live DeBERTa in normal pytest
 

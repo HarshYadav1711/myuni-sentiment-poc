@@ -340,6 +340,32 @@ FORBIDDEN_DIAGNOSIS_LABELS: Final[frozenset[str]] = frozenset(
     },
 )
 
+# ---------------------------------------------------------------------------
+# Phase 4C.1 — semantic signal groups (language/evidence only)
+#
+# These are CONTENT EVIDENCE categories, not diagnoses.
+# No severity ranking and no numerical weights between signals.
+# ---------------------------------------------------------------------------
+
+RECOVERY_SIGNAL_IDS: Final[frozenset[str]] = frozenset(
+    {
+        "positive_wellbeing_or_recovery",
+    },
+)
+
+DISTRESS_LIKE_SIGNAL_IDS: Final[frozenset[str]] = frozenset(
+    {
+        "stress_or_overwhelm",
+        "anxiety_or_fear_language",
+        "loneliness_or_isolation",
+        "hopelessness_like_language",
+        "exhaustion_or_burnout_like_language",
+        "self_directed_negativity",
+        "interpersonal_distress",
+        "academic_pressure",
+    },
+)
+
 
 def candidate_list(candidates: Mapping[str, str], labels: tuple[str, ...]) -> list[str]:
     """Ordered list of human-readable candidate strings for a taxonomy."""

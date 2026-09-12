@@ -345,6 +345,13 @@ class WellbeingShadowAnalysis(BaseModel):
     source_results: list[WellbeingShadowSourceResult] = Field(default_factory=list)
     window_results: list[WellbeingShadowWindowResult] = Field(default_factory=list)
     summary: WellbeingShadowSummary = Field(default_factory=WellbeingShadowSummary)
+    evidence_context: Optional["WellbeingEvidenceContext"] = Field(
+        default=None,
+        description=(
+            "Phase 4C.1 deterministic evidence aggregation. Optional; "
+            "does not alter FinalTemporalAssessment or client indicator."
+        ),
+    )
     processing_seconds: Optional[float] = None
     affects_final_assessment: Literal[False] = False
     note: str = (
@@ -352,6 +359,137 @@ class WellbeingShadowAnalysis(BaseModel):
         "indicator, sentiment, fusion, or temporal assessment."
     )
     error_code: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# Phase 4C.1 — deterministic wellbeing evidence aggregation (non-policy)
+#
+# Global transcript/source and local windows serve DIFFERENT roles:
+# - GLOBAL: authorship / context / whole-content semantics
+# - WINDOWS: temporal localization / recurrence / transitions
+# They are not equivalent votes. Signal probabilities are never averaged.
+# ---------------------------------------------------------------------------
+
+WellbeingEvidenceStatus = Literal[
+    "ok",
+    "empty",
+    "insufficient",
+    "error",
+]
+
+WellbeingConflictDiagnostic = Literal[
+    "global_eligible_no_local_support",
+    "local_eligible_without_global_eligibility",
+    "global_recovery_local_distress",
+    "global_distress_local_recovery",
+]
+
+
+class WellbeingSignalTemporalEvidence(BaseModel):
+    """Per-signal recurrence across eligible windows (descriptive only)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    signal: str
+    window_count: int = 0
+    window_indices: list[int] = Field(default_factory=list)
+    first_start: Optional[float] = None
+    last_end: Optional[float] = None
+
+
+class WellbeingEligibleRun(BaseModel):
+    """One consecutive run of eligible wellbeing windows."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    start_window: int
+    end_window: int
+    start: float
+    end: float
+    window_count: int
+    duration_seconds: float
+    signal_ids: list[str] = Field(default_factory=list)
+
+
+class WellbeingTemporalEvidence(BaseModel):
+    """Aggregated temporal/window wellbeing evidence (descriptive only).
+
+    ``eligible_window_fraction`` is descriptive recurrence, not a
+    wellbeing probability or concern score.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    evaluated_window_count: int = 0
+    eligible_window_count: int = 0
+    uncertain_window_count: int = 0
+    not_eligible_window_count: int = 0
+
+    eligible_window_indices: list[int] = Field(default_factory=list)
+    eligible_window_fraction: Optional[float] = None
+
+    first_eligible_start: Optional[float] = None
+    last_eligible_end: Optional[float] = None
+
+    eligible_runs: list[WellbeingEligibleRun] = Field(default_factory=list)
+    longest_eligible_run_windows: int = 0
+    longest_eligible_run_seconds: float = 0.0
+
+    distress_window_count: int = 0
+    recovery_window_count: int = 0
+    mixed_signal_window_count: int = 0
+
+    signal_evidence: list[WellbeingSignalTemporalEvidence] = Field(
+        default_factory=list,
+    )
+
+
+class WellbeingGlobalEvidence(BaseModel):
+    """Global (non-window) source evidence — typically full transcript.
+
+    Preserves classification fields only. No averaged scores.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_present: bool = False
+    source_role: Optional[ShadowSourceRole] = None
+    classification_status: Optional[ClassifierStatus] = None
+    relevance: Optional[str] = None
+    target: Optional[str] = None
+    eligibility_status: Optional[EligibilityStatus] = None
+    personal_wellbeing_eligible: bool = False
+    final_attribution: Optional[str] = None
+    selected_signals: list[str] = Field(default_factory=list)
+
+
+class WellbeingEvidenceContext(BaseModel):
+    """Deterministic wellbeing evidence feature layer (Phase 4C.1).
+
+    Not a concern policy. No mental-health score. No final concern category.
+    ``affects_final_assessment`` is always False in this phase.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: WellbeingEvidenceStatus = "empty"
+    global_evidence: WellbeingGlobalEvidence = Field(
+        default_factory=WellbeingGlobalEvidence,
+    )
+    temporal_evidence: WellbeingTemporalEvidence = Field(
+        default_factory=WellbeingTemporalEvidence,
+    )
+    evidence_ids: list[str] = Field(default_factory=list)
+    conflict_diagnostics: list[WellbeingConflictDiagnostic] = Field(
+        default_factory=list,
+        description="Machine-readable global/local disagreement codes only.",
+    )
+    affects_final_assessment: Literal[False] = False
+    note: str = (
+        "Wellbeing evidence aggregation only. Global and window evidence "
+        "serve different roles and are not majority-voted. No concern "
+        "category or wellbeing score is produced in Phase 4C.1."
+    )
 
 
 EXPECTED_RELEVANCE_LABELS = RELEVANCE_LABELS

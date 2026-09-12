@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from typing import Any, Optional, Sequence
 
 from src.config import resolve_wellbeing_shadow_enabled
+from src.wellbeing.evidence import build_wellbeing_evidence_context
 from src.wellbeing.schemas import (
     WellbeingClassificationResult,
     WellbeingShadowAnalysis,
@@ -246,9 +247,15 @@ def build_wellbeing_shadow(
             temporal_context=temporal_context,
         )
         if not items:
+            empty_evidence = build_wellbeing_evidence_context(
+                source_results=[],
+                window_results=[],
+                shadow_status="insufficient_text",
+            )
             return WellbeingShadowAnalysis(
                 status="insufficient_text",
                 summary=_empty_summary(),
+                evidence_context=empty_evidence,
                 processing_seconds=round(time.perf_counter() - t0, 4),
                 note=(
                     "Shadow mode enabled but no usable authored textual evidence "
@@ -303,12 +310,20 @@ def build_wellbeing_shadow(
             items_submitted=len(items),
             windows_submitted=windows_submitted,
         )
+        status = _status_for_results(source_results, window_results)
+        # Phase 4C.1: deterministic evidence aggregation (no extra model call).
+        evidence_context = build_wellbeing_evidence_context(
+            source_results=source_results,
+            window_results=window_results,
+            shadow_status=status,
+        )
         return WellbeingShadowAnalysis(
-            status=_status_for_results(source_results, window_results),  # type: ignore[arg-type]
+            status=status,  # type: ignore[arg-type]
             model_id=model_id,
             source_results=source_results,
             window_results=window_results,
             summary=summary,
+            evidence_context=evidence_context,
             processing_seconds=round(time.perf_counter() - t0, 4),
         )
     except Exception as exc:  # noqa: BLE001 — fail soft for pipeline isolation
@@ -316,9 +331,11 @@ def build_wellbeing_shadow(
             "Wellbeing shadow analysis failed (%s)",
             type(exc).__name__,
         )
+        # Do not manufacture evidence after classification failure.
         return WellbeingShadowAnalysis(
             status="error",
             summary=_empty_summary(),
+            evidence_context=None,
             processing_seconds=round(time.perf_counter() - t0, 4),
             error_code=type(exc).__name__,
             note=(
