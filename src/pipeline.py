@@ -23,6 +23,7 @@ from src.config import (
     TemporalReasonerConfig,
     VideoSamplingConfig,
     resolve_temporal_reasoner_config,
+    resolve_wellbeing_authority_mode,
     resolve_wellbeing_shadow_enabled,
 )
 from src.fusion import fuse_modalities
@@ -43,6 +44,7 @@ from src.schemas import (
     ModalityBundle,
     SpeechAnalysisResult,
 )
+from src.wellbeing.migration import attach_authority_comparison
 from src.wellbeing.shadow import build_wellbeing_shadow
 
 logger = logging.getLogger(__name__)
@@ -121,6 +123,10 @@ class MyUniSentimentPipeline:
 
         When shadow mode is disabled, returns ``analysis`` unchanged and does
         not load DeBERTa. Failures are captured inside the shadow result.
+
+        Phase 4C.5: when shadow is present, attach non-authoritative
+        ``authority_comparison`` diagnostics. Never mutates
+        ``final_temporal_assessment``.
         """
         if not resolve_wellbeing_shadow_enabled():
             return analysis
@@ -132,6 +138,24 @@ class MyUniSentimentPipeline:
         )
         if shadow is None:
             return analysis
+
+        legacy_indicator = None
+        fta = analysis.final_temporal_assessment
+        if fta is not None:
+            legacy_indicator = fta.overall_wellbeing_indicator
+        try:
+            mode = resolve_wellbeing_authority_mode()
+        except ValueError:
+            # Invalid mode must not break the main pipeline; keep legacy authority.
+            mode = "legacy"
+        comparison = attach_authority_comparison(
+            policy_candidate=shadow.policy_candidate,
+            legacy_indicator=legacy_indicator,
+            mode=mode,
+            shadow_enabled=True,
+            shadow_status=shadow.status,
+        )
+        shadow = shadow.model_copy(update={"authority_comparison": comparison})
         return analysis.model_copy(update={"wellbeing_shadow": shadow})
 
     def analyze_speech(self, media_path: object) -> SpeechAnalysisResult:

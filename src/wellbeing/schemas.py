@@ -359,6 +359,13 @@ class WellbeingShadowAnalysis(BaseModel):
             "does not alter FinalTemporalAssessment or client indicator."
         ),
     )
+    authority_comparison: Optional["WellbeingAuthorityComparison"] = Field(
+        default=None,
+        description=(
+            "Phase 4C.5 non-authoritative legacy-vs-candidate comparison. "
+            "Does not alter FinalTemporalAssessment."
+        ),
+    )
     processing_seconds: Optional[float] = None
     affects_final_assessment: Literal[False] = False
     note: str = (
@@ -569,6 +576,61 @@ class WellbeingPolicyCandidate(BaseModel):
         "Shadow policy candidate only. Content-level wellbeing evidence "
         "interpretation — not a diagnosis, clinical risk level, or "
         "replacement for the existing temporal wellbeing indicator."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Phase 4C.5 — authority migration comparison (control plane; non-authoritative)
+#
+# VIDEO-first migration design. Default mode is legacy. Candidate authority
+# is NOT activated in this phase. Comparison never mutates either result.
+# ---------------------------------------------------------------------------
+
+WellbeingAuthorityMode = Literal["legacy", "compare", "candidate"]
+
+WellbeingAuthorityAgreement = Literal[
+    "same",
+    "different",
+    "candidate_unavailable",
+    "not_compared",
+]
+
+WellbeingCandidateOutcomeKind = Literal[
+    "available",
+    "semantic_abstention",
+    "technical_failure",
+    "unavailable",
+]
+
+
+class WellbeingAuthorityComparison(BaseModel):
+    """Non-authoritative legacy vs candidate comparison diagnostics.
+
+    Attached to shadow analysis only. Never alters FinalTemporalAssessment
+    in Phase 4C.5. ``affects_final_assessment`` is always False here.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: WellbeingAuthorityMode = "legacy"
+    migration_scope: Literal["video"] = "video"
+    legacy_indicator: Optional[str] = None
+    candidate_indicator: Optional[str] = None
+    candidate_status: Optional[str] = None
+    agreement: WellbeingAuthorityAgreement = "not_compared"
+    legacy_available: bool = False
+    candidate_available: bool = False
+    candidate_outcome_kind: WellbeingCandidateOutcomeKind = "unavailable"
+    fallback_required: bool = False
+    fallback_reason: Optional[str] = None
+    comparison_reason_codes: list[str] = Field(default_factory=list)
+    candidate_policy_version: Optional[str] = None
+    candidate_evidence_ids: list[str] = Field(default_factory=list)
+    affects_final_assessment: Literal[False] = False
+    note: str = (
+        "Authority migration comparison only. Legacy remains authoritative "
+        "while mode is legacy/compare. Candidate mode is not activated in "
+        "Phase 4C.5. Disagreement does not imply either side is correct."
     )
 
 

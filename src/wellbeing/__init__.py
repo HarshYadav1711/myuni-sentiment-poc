@@ -13,8 +13,14 @@ from src.wellbeing.classifier import (
     get_wellbeing_classifier,
 )
 from src.wellbeing.evidence import build_wellbeing_evidence_context
+from src.wellbeing.migration import (
+    attach_authority_comparison,
+    classify_candidate_outcome,
+    compare_wellbeing_policies,
+)
 from src.wellbeing.policy_candidate import build_wellbeing_policy_candidate
 from src.wellbeing.schemas import (
+    WellbeingAuthorityComparison,
     WellbeingClassificationResult,
     WellbeingEvidenceContext,
     WellbeingPolicyCandidate,
@@ -23,14 +29,18 @@ from src.wellbeing.schemas import (
 from src.wellbeing.shadow import build_wellbeing_shadow
 
 __all__ = [
+    "WellbeingAuthorityComparison",
     "WellbeingClassifier",
     "WellbeingClassificationResult",
     "WellbeingEvidenceContext",
     "WellbeingPolicyCandidate",
     "WellbeingShadowAnalysis",
+    "attach_authority_comparison",
     "build_wellbeing_evidence_context",
     "build_wellbeing_policy_candidate",
     "build_wellbeing_shadow",
+    "classify_candidate_outcome",
     "classify_wellbeing",
+    "compare_wellbeing_policies",
     "get_wellbeing_classifier",
 ]

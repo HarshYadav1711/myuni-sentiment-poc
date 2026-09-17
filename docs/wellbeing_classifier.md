@@ -691,6 +691,131 @@ not wire into `FinalTemporalAssessment` or Gradio.
 Phase 4C.5 should be **authority-migration design** — not automatic
 replacement of the client-facing wellbeing indicator.
 
+## Phase 4C.5 — authority migration design (control plane)
+
+Phase 4C.5 adds the **migration control plane** for eventually making
+`phase4c2-v1` authoritative on **VIDEO** wellbeing assessment.
+
+It does **not** activate candidate authority.
+
+Implementation:
+
+- `src/wellbeing/migration.py` → `compare_wellbeing_policies(...)`
+- `WellbeingAuthorityComparison` schema (attached to shadow only)
+- `WELLBEING_AUTHORITY_MODE` / `WELLBEING_CANDIDATE_AUTHORITY_ACTIVATED`
+- `tests/test_wellbeing_migration.py`
+
+### Authority modes
+
+| Mode | Meaning |
+| --- | --- |
+| `legacy` (default) | `src/temporal/wellbeing.py` remains authoritative |
+| `compare` | Legacy authoritative; candidate compared; diagnostics recorded |
+| `candidate` | Reserved — **not activated** in Phase 4C.5 |
+
+Default is **legacy**. Candidate mode requires a later activation phase
+(`WELLBEING_CANDIDATE_AUTHORITY_ACTIVATED=true`) and must not silently
+route `FinalTemporalAssessment`.
+
+### Why compare does not alter client output
+
+Compare mode records `authority_comparison` on `WellbeingShadowAnalysis`
+only. `FinalTemporalAssessment.overall_wellbeing_indicator` remains the
+legacy value. `affects_final_assessment=False`.
+
+### Technical failure vs semantic abstention
+
+| Kind | Examples |
+| --- | --- |
+| Technical failure | shadow disabled, classifier unavailable/error, policy unavailable |
+| Semantic abstention | globally non-personal, attribution uncertain, recovery/distress conflict, insufficient personal evidence |
+
+`insufficient_evidence` from quoted-other / topic-only content is
+**successful conservative behavior**, not a system failure.
+
+### Fallback contract
+
+- Compare / legacy: legacy remains authoritative; no runtime fallback action
+- Candidate mode (future, when activated): technical failure may fall back
+  to legacy with explicit `fallback_reason`
+- Semantic abstention must **not** auto-fallback unless a future contract
+  explicitly chooses that
+
+### Rollback
+
+Rollback requires only:
+
+```text
+WELLBEING_AUTHORITY_MODE=legacy
+```
+
+No code revert. `src/temporal/wellbeing.py` remains intact.
+
+### Shadow / authority configuration matrix
+
+| Shadow | Authority mode | Behavior |
+| --- | --- | --- |
+| False | legacy | Existing behavior only |
+| True | legacy | Existing authority + shadow evidence (+ optional diagnostics) |
+| True | compare | Existing authority + candidate + comparison diagnostics |
+| False | compare | Candidate unavailable; legacy remains authoritative |
+| * | candidate | Reserved / not activated in 4C.5 (`candidate_mode_not_activated`) |
+
+`WELLBEING_SHADOW_ENABLED` and `WELLBEING_AUTHORITY_MODE` are independent.
+Compare mode does **not** silently enable shadow.
+
+### Disagreement taxonomy
+
+Examples: `legacy_low_candidate_moderate`,
+`legacy_moderate_candidate_high`, `candidate_conflict`,
+`candidate_unavailable`. **Different ≠ candidate better.**
+
+### Future UI terminology (not implemented yet)
+
+Avoid “Overall Well-Being Score” / numerical score language.
+
+Recommended direction:
+
+- Label: **Wellbeing Indicator**
+- Categories: **Low Concern / Moderate Concern / High Concern /
+  Insufficient Evidence**
+
+Avoid clinical/risk phrasing (diagnosis, suicide risk, emergency triage).
+
+### High Concern meaning
+
+**High Concern** means persistent content-level personal distress evidence
+under the POC recurrence policy (≥2 consecutive distress-supporting
+windows). It does **not** mean high suicide risk, severe mental illness,
+clinical emergency, or diagnosis.
+
+### Video-only migration scope
+
+Authority migration is scoped to **VIDEO** `FinalTemporalAssessment`.
+Text / image / audio may keep shadow/evaluation evidence without becoming
+authoritative product outputs in this phase.
+
+### Migration-readiness checklist (future activation)
+
+Before candidate becomes authoritative, require:
+
+- [x] 4C.3 deterministic policy validation passed
+- [x] 4C.4 full shadow-chain replay passed
+- [ ] real compare-mode video validation
+- [ ] disagreement review completed
+- [ ] runtime acceptable
+- [ ] failure/fallback validated in live compare
+- [ ] rollback tested operationally
+- [ ] UI terminology approved
+- [ ] client/product semantics approved
+- [ ] observability exists
+
+### Candidate mode not activated yet
+
+`WELLBEING_CANDIDATE_AUTHORITY_ACTIVATED` defaults to **false**.
+Phase 4C.6 should perform controlled live compare validation before any
+authority activation design sign-off.
+
 ## Why OpenRouter is not the authority for classifier labels
 
 OpenRouter is used for **contextual temporal reasoning** over structured
@@ -716,6 +841,8 @@ labels.
   validation is engineering agreement, not clinical validation
 - Phase 4C.4 replays structured classifier outputs through the full
   evidence→policy chain without model inference; candidate remains shadow-only
+- Phase 4C.5 adds authority migration comparison controls; default remains
+  legacy; candidate authority is not activated
 - No multimodal / facial / OCR personal-attribution path (by design)
 - Ordinary unit tests mock the classifier; no live DeBERTa in normal pytest
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Mapping, Optional
+from typing import Any, Literal, Mapping, Optional
 
 
 # Text sentiment (RoBERTa).
@@ -190,6 +190,12 @@ WELLBEING_ATTRIBUTION_MIN_TOP_SCORE = 0.0
 # Phase 4B: shadow-mode pipeline integration (default OFF — CPU DeBERTa is expensive).
 # When False, the pipeline must not load or call the wellbeing classifier.
 WELLBEING_SHADOW_ENABLED = False
+
+# Phase 4C.5: authority migration control plane (independent of shadow enable).
+# Default legacy — existing temporal wellbeing gate remains authoritative.
+# candidate mode is RESERVED and not activated in Phase 4C.5.
+WELLBEING_AUTHORITY_MODE = "legacy"
+WELLBEING_CANDIDATE_AUTHORITY_ACTIVATED = False
 
 # RoBERTa max sequence length; longer transcripts are chunked (not silently truncated).
 TEXT_MAX_LENGTH = 512
@@ -690,7 +696,62 @@ def resolve_wellbeing_shadow_enabled(
 
     Default False. Environment: ``WELLBEING_SHADOW_ENABLED``.
     Does not change ``WELLBEING_CLASSIFIER_ENABLED`` semantics.
+    Independent of ``WELLBEING_AUTHORITY_MODE``.
     """
     if override is not None:
         return bool(override)
     return _env_bool("WELLBEING_SHADOW_ENABLED", WELLBEING_SHADOW_ENABLED)
+
+
+WellbeingAuthorityModeName = Literal["legacy", "compare", "candidate"]
+_VALID_WELLBEING_AUTHORITY_MODES = frozenset({"legacy", "compare", "candidate"})
+
+
+def resolve_wellbeing_authority_mode(
+    *,
+    override: Optional[str] = None,
+) -> WellbeingAuthorityModeName:
+    """Resolve Phase 4C.5 wellbeing authority mode.
+
+    Default ``legacy``. Environment: ``WELLBEING_AUTHORITY_MODE``.
+
+    Unknown values raise ``ValueError`` (no silent typo fallback to legacy).
+    Independent of ``WELLBEING_SHADOW_ENABLED``.
+
+    ``candidate`` mode is reserved; activation is gated separately by
+    ``WELLBEING_CANDIDATE_AUTHORITY_ACTIVATED`` (False in Phase 4C.5).
+    """
+    if override is not None:
+        raw = str(override).strip().lower()
+    else:
+        env = os.environ.get("WELLBEING_AUTHORITY_MODE")
+        raw = (
+            str(env).strip().lower()
+            if env is not None and str(env).strip()
+            else str(WELLBEING_AUTHORITY_MODE).strip().lower()
+        )
+    if raw not in _VALID_WELLBEING_AUTHORITY_MODES:
+        raise ValueError(
+            f"Invalid WELLBEING_AUTHORITY_MODE={raw!r}; "
+            f"expected one of {sorted(_VALID_WELLBEING_AUTHORITY_MODES)}",
+        )
+    return raw  # type: ignore[return-value]
+
+
+def resolve_wellbeing_candidate_authority_activated(
+    *,
+    override: Optional[bool] = None,
+) -> bool:
+    """Whether candidate authority routing is activated (Phase 4C.5: always False default).
+
+    Environment: ``WELLBEING_CANDIDATE_AUTHORITY_ACTIVATED``.
+    Even if authority mode is ``candidate``, FinalTemporalAssessment must not
+    be routed through the new policy until this flag is explicitly enabled in
+    a later activation phase.
+    """
+    if override is not None:
+        return bool(override)
+    return _env_bool(
+        "WELLBEING_CANDIDATE_AUTHORITY_ACTIVATED",
+        WELLBEING_CANDIDATE_AUTHORITY_ACTIVATED,
+    )
