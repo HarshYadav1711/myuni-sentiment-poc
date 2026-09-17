@@ -537,6 +537,93 @@ validated persistence.
 Validate this shadow candidate against controlled evidence before any
 authority wiring into the client-facing wellbeing path.
 
+## Phase 4C.3 — deterministic policy validation
+
+Phase 4C.3 validates `phase4c2-v1` with a **deterministic structured
+scenario harness**. It does **not** change policy authority.
+
+Implementation:
+
+- `evaluation/wellbeing/policy_scenarios.py` — human-authored evidence
+  fixtures + expected outcomes (independent of the policy function)
+- `evaluation/wellbeing/policy_validation.py` — engineering validation
+  harness / metrics / invariants
+- `tests/test_wellbeing_policy_validation.py` — pytest entrypoint
+
+### Structured scenario validation
+
+Scenarios are synthetic **engineering evidence states**, not student
+examples and not clinical data. Each fixture includes explicit expected:
+
+- status / indicator
+- local_support_level / distress_pattern / recovery_pattern
+- required reason codes
+
+Expected values are **not** derived by calling the policy.
+
+### Policy invariants (engineering safety)
+
+1. No globally eligible personal wellbeing → never low/moderate/high
+2. High requires global eligible distress **and** ≥2 consecutive
+   distress-supporting windows
+3–5. Isolated hopelessness / self-negativity / anxiety alone never force high
+6. Different distress labels across adjacent windows may still form
+   persistent temporal support
+7. Recovery does not simply subtract from distress
+8. Material mixed recovery/distress conflict is never averaged into a
+   fake middle category
+9. Local windows cannot override globally non-personal attribution
+10. Global personal distress remains usable when local windows lack context
+
+### Temporal recurrence semantics
+
+Adjacency uses **window_index**, not timestamp inference. A short final
+window can still complete a consecutive pair. Nonconsecutive indices
+(`[1,3]`) do not form persistence.
+
+### Recovery / distress conflict semantics (phase4c2-v1)
+
+| Case | Result |
+| --- | --- |
+| Global recovery + no local distress | `low_concern` |
+| Global recovery + recovery windows | `low_concern` |
+| Global recovery + isolated local distress | `low_concern` |
+| Global recovery + persistent local distress | `conflict` / `insufficient_evidence` |
+| Global distress + recurrent local recovery | `conflict` / `insufficient_evidence` |
+| Global distress + recovery (mixed global) | `conflict` / `insufficient_evidence` |
+
+### Controlled-video structured replay
+
+One fixture (`replay_controlled_video_phase4b`) replays the previously
+observed Phase 4B/4C structured evidence shape (global distress + isolated
+window-3 distress including hopelessness-like language). Expected:
+`moderate_concern`. This is **structured replay**, not a new live run.
+
+### Adversarial scenarios
+
+Corpus includes attempts such as all eight distress IDs in one window,
+many nonconsecutive distress windows, local-only persistence, missing
+evidence IDs, classifier-error populated fields, and out-of-order window
+construction. Policy must fail safe / remain deterministic.
+
+### Engineering validation — not clinical validation
+
+Reported metrics are engineering agreement / invariant / determinism /
+evidence-grounding checks. They are **not** clinical accuracy,
+sensitivity, specificity, or medical validation.
+
+### No ML thresholds changed
+
+Phase 4C.3 does not retune DeBERTa, attribution thresholds, signal
+threshold, Whisper, SigLIP, OpenRouter, or sentiment/temporal formulas.
+
+### Policy remains shadow-only
+
+Even after validation passes, `affects_final_assessment=False`. Do **not**
+wire into `FinalTemporalAssessment` or replace
+`compute_wellbeing_indicator()` in this phase. Next step:
+Phase 4C.4 shadow replay before any authority migration.
+
 ## Why OpenRouter is not the authority for classifier labels
 
 OpenRouter is used for **contextual temporal reasoning** over structured
@@ -558,6 +645,8 @@ labels.
   concern category by itself
 - Policy candidate (Phase 4C.2) is shadow-only; 2-window persistence is an
   engineering POC rule, not clinically validated
+- Phase 4C.3 validates the candidate with structured scenarios only;
+  validation is engineering agreement, not clinical validation
 - No multimodal / facial / OCR personal-attribution path (by design)
 - Ordinary unit tests mock the classifier; no live DeBERTa in normal pytest
 
