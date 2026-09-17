@@ -16,6 +16,7 @@ from typing import Any, Optional, Sequence
 
 from src.config import resolve_wellbeing_shadow_enabled
 from src.wellbeing.evidence import build_wellbeing_evidence_context
+from src.wellbeing.policy_candidate import build_wellbeing_policy_candidate
 from src.wellbeing.schemas import (
     WellbeingClassificationResult,
     WellbeingShadowAnalysis,
@@ -252,10 +253,12 @@ def build_wellbeing_shadow(
                 window_results=[],
                 shadow_status="insufficient_text",
             )
+            empty_policy = build_wellbeing_policy_candidate(empty_evidence)
             return WellbeingShadowAnalysis(
                 status="insufficient_text",
                 summary=_empty_summary(),
                 evidence_context=empty_evidence,
+                policy_candidate=empty_policy,
                 processing_seconds=round(time.perf_counter() - t0, 4),
                 note=(
                     "Shadow mode enabled but no usable authored textual evidence "
@@ -317,6 +320,8 @@ def build_wellbeing_shadow(
             window_results=window_results,
             shadow_status=status,
         )
+        # Phase 4C.2: deterministic shadow policy candidate (evidence only).
+        policy_candidate = build_wellbeing_policy_candidate(evidence_context)
         return WellbeingShadowAnalysis(
             status=status,  # type: ignore[arg-type]
             model_id=model_id,
@@ -324,6 +329,7 @@ def build_wellbeing_shadow(
             window_results=window_results,
             summary=summary,
             evidence_context=evidence_context,
+            policy_candidate=policy_candidate,
             processing_seconds=round(time.perf_counter() - t0, 4),
         )
     except Exception as exc:  # noqa: BLE001 — fail soft for pipeline isolation
@@ -331,11 +337,12 @@ def build_wellbeing_shadow(
             "Wellbeing shadow analysis failed (%s)",
             type(exc).__name__,
         )
-        # Do not manufacture evidence after classification failure.
+        # Do not manufacture evidence/policy after classification failure.
         return WellbeingShadowAnalysis(
             status="error",
             summary=_empty_summary(),
             evidence_context=None,
+            policy_candidate=None,
             processing_seconds=round(time.perf_counter() - t0, 4),
             error_code=type(exc).__name__,
             note=(

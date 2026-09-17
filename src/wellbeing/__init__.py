@@ -13,9 +13,11 @@ from src.wellbeing.classifier import (
     get_wellbeing_classifier,
 )
 from src.wellbeing.evidence import build_wellbeing_evidence_context
+from src.wellbeing.policy_candidate import build_wellbeing_policy_candidate
 from src.wellbeing.schemas import (
     WellbeingClassificationResult,
     WellbeingEvidenceContext,
+    WellbeingPolicyCandidate,
     WellbeingShadowAnalysis,
 )
 from src.wellbeing.shadow import build_wellbeing_shadow
@@ -24,8 +26,10 @@ __all__ = [
     "WellbeingClassifier",
     "WellbeingClassificationResult",
     "WellbeingEvidenceContext",
+    "WellbeingPolicyCandidate",
     "WellbeingShadowAnalysis",
     "build_wellbeing_evidence_context",
+    "build_wellbeing_policy_candidate",
     "build_wellbeing_shadow",
     "classify_wellbeing",
     "get_wellbeing_classifier",

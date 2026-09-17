@@ -405,17 +405,137 @@ wellbeing.
 `WellbeingShadowAnalysis` classification fields (plus window
 index/start/end provenance).
 
-### Why no concern level yet
+### Why no concern level in 4C.1
 
-This phase ships an inspectable evidence context for Phase 4C.2 policy
-design. Concern thresholds, priority rules, and client mapping are
-intentionally deferred.
+Phase 4C.1 ships an inspectable evidence context only. Concern policy is
+Phase 4C.2 and remains shadow-only until Phase 4C.3 validation.
 
 ### Input to Phase 4C.2
 
-Phase 4C.2 should consume `WellbeingEvidenceContext` (global + temporal
+Phase 4C.2 consumes `WellbeingEvidenceContext` (global + temporal
 evidence, eligible runs, signal recurrence, recovery/distress/mixed
 counts, conflict diagnostics) — not raw multimodal sentiment features.
+
+## Phase 4C.2 — deterministic shadow wellbeing policy candidate
+
+Phase 4C.2 adds a **transparent deterministic policy candidate** on top of
+`WellbeingEvidenceContext`.
+
+Implementation: `src/wellbeing/policy_candidate.py` →
+`build_wellbeing_policy_candidate(evidence)`.
+
+Attached as `WellbeingShadowAnalysis.policy_candidate`.
+
+**Still shadow-only.** It does **not** replace:
+
+- `src/temporal/wellbeing.py` / `compute_wellbeing_indicator()`
+- `FinalTemporalAssessment` / `build_final_temporal_assessment()`
+- Gradio client wellbeing result
+- routed analysis status
+
+Policy version: `phase4c2-v1`.
+
+### Evidence vs policy separation
+
+| Layer | Object | Role |
+| --- | --- | --- |
+| 4C.1 evidence | `evidence_context` | Deterministic facts |
+| 4C.2 policy | `policy_candidate` | Deterministic interpretation |
+
+Do not mix these concepts. Facts stay inspectable even when the candidate
+abstains.
+
+### Global contextual authority
+
+GLOBAL transcript/content evidence has more linguistic context than short
+fragments. Categorical concern candidates normally require **globally
+eligible** personal wellbeing evidence.
+
+WINDOWS provide temporal/local support only. They do **not** promote
+local-only fragments into low/moderate/high.
+
+### Window temporal-support role / why windows are not votes
+
+Windows answer localization and recurrence. They are not ballots equal to
+the global source. No majority vote. No averaging of signal scores.
+
+### Candidate indicator semantics
+
+| Indicator | Meaning (content-level) |
+| --- | --- |
+| `low_concern` | Global eligible recovery-only / no distress, without recurrent/persistent local distress |
+| `moderate_concern` | Global eligible distress; local distress none/isolated/recurrent (local support **not** required) |
+| `high_concern` | Global eligible distress **and** persistent local distress (≥2 consecutive distress-supporting windows) |
+| `insufficient_evidence` | Gate failure, local-only, or unresolved mixed conflict |
+
+These are **not** diagnoses, clinical risk levels, suicide-risk predictions,
+mental-health scores, or medical triage.
+
+### Why high does not mean clinical high risk
+
+`high_concern` means persistent **content-level** personal distress evidence
+under a transparent engineering recurrence rule. It is not clinical high
+risk and must not be presented as such.
+
+### Why distress signal names have no severity weights
+
+Signal identity alone does not determine concern level. There is no encoding
+such as `hopelessness = 3`, `anxiety = 2`, `stress = 1`.
+
+### Why isolated “hopelessness-like” does not force high
+
+Isolated local distress (including `hopelessness_like_language` or
+`self_directed_negativity` alone) yields at most **moderate** when global
+distress exists. High requires **temporal persistence** (consecutive
+distress-supporting windows), not a particular signal name.
+
+### Why mixed recovery/distress abstains
+
+Contradictory recovery and distress evidence is not averaged. Material
+unresolved conflicts (e.g. global recovery + persistent local distress,
+global distress + recurrent local recovery, global distress+recovery)
+return `status=conflict` and `indicator=insufficient_evidence`.
+
+### Why local-only evidence cannot override global context
+
+Short speech fragments can lose attribution/context. If global is not
+eligible / uncertain / absent, local eligible windows remain diagnostic
+only (`local_eligible_without_global_eligibility`) and cannot produce
+low/moderate/high.
+
+### Why global-only eligible evidence remains usable
+
+Global eligible distress with zero local support may still be
+`moderate_concern`. Global eligible recovery with no local distress may be
+`low_concern`. Diagnostic `global_eligible_no_local_support` is preserved
+but does not invalidate the candidate.
+
+### Exclusions (mandatory input boundary)
+
+Policy consumes **only** `WellbeingEvidenceContext`. It must not inspect:
+
+- raw transcript / speech / caption text
+- OCR
+- SigLIP / visual sentiment / faces
+- sentiment probabilities
+- `TemporalFeatures.negative_persistence` / `trajectory`
+- `TemporalWindow.negative_probability`
+- multimodal cross-modal conflict
+- OpenRouter reasoning
+- current overall wellbeing indicator
+
+### POC nature of 2-consecutive-window persistence
+
+`persistent` distress = **≥ 2 consecutive** eligible windows containing
+selected distress-like evidence.
+
+This is a **transparent engineering recurrence rule**, not clinically
+validated persistence.
+
+### Phase 4C.3
+
+Validate this shadow candidate against controlled evidence before any
+authority wiring into the client-facing wellbeing path.
 
 ## Why OpenRouter is not the authority for classifier labels
 
@@ -435,7 +555,9 @@ labels.
 - Shadow mode is non-authoritative (Phase 4B) — does not feed
   `compute_wellbeing_indicator()` or `FinalTemporalAssessment`
 - Evidence aggregation (Phase 4C.1) is non-authoritative and produces no
-  concern category or wellbeing score
+  concern category by itself
+- Policy candidate (Phase 4C.2) is shadow-only; 2-window persistence is an
+  engineering POC rule, not clinically validated
 - No multimodal / facial / OCR personal-attribution path (by design)
 - Ordinary unit tests mock the classifier; no live DeBERTa in normal pytest
 

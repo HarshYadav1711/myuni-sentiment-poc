@@ -352,6 +352,13 @@ class WellbeingShadowAnalysis(BaseModel):
             "does not alter FinalTemporalAssessment or client indicator."
         ),
     )
+    policy_candidate: Optional["WellbeingPolicyCandidate"] = Field(
+        default=None,
+        description=(
+            "Phase 4C.2 deterministic shadow policy candidate. Optional; "
+            "does not alter FinalTemporalAssessment or client indicator."
+        ),
+    )
     processing_seconds: Optional[float] = None
     affects_final_assessment: Literal[False] = False
     note: str = (
@@ -489,6 +496,79 @@ class WellbeingEvidenceContext(BaseModel):
         "Wellbeing evidence aggregation only. Global and window evidence "
         "serve different roles and are not majority-voted. No concern "
         "category or wellbeing score is produced in Phase 4C.1."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Phase 4C.2 — deterministic shadow wellbeing policy candidate (non-authoritative)
+#
+# Interprets WellbeingEvidenceContext only. Shadow-only: never replaces
+# compute_wellbeing_indicator() / FinalTemporalAssessment / Gradio output.
+# Categories are content-level evidence labels — not diagnoses or clinical risk.
+# ---------------------------------------------------------------------------
+
+WellbeingPolicyStatus = Literal[
+    "ok",
+    "insufficient_evidence",
+    "conflict",
+    "unavailable",
+]
+
+WellbeingPolicyIndicator = Literal[
+    "low_concern",
+    "moderate_concern",
+    "high_concern",
+    "insufficient_evidence",
+]
+
+WellbeingLocalSupportLevel = Literal[
+    "none",
+    "isolated",
+    "recurrent",
+    "persistent",
+]
+
+WellbeingDistressPattern = Literal[
+    "none",
+    "isolated",
+    "recurrent",
+    "persistent",
+    "mixed_with_recovery",
+]
+
+WellbeingRecoveryPattern = Literal[
+    "none",
+    "global_only",
+    "local_only",
+    "recurrent",
+    "mixed_with_distress",
+]
+
+
+class WellbeingPolicyCandidate(BaseModel):
+    """Experimental deterministic concern candidate (Phase 4C.2).
+
+    Shadow-only interpretation of ``WellbeingEvidenceContext``.
+    Not a clinical judgment, triage score, or client-facing indicator.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: WellbeingPolicyStatus = "insufficient_evidence"
+    indicator: WellbeingPolicyIndicator = "insufficient_evidence"
+    reason_codes: list[str] = Field(default_factory=list)
+    supporting_evidence_ids: list[str] = Field(default_factory=list)
+    conflict_evidence_ids: list[str] = Field(default_factory=list)
+    global_eligible: bool = False
+    local_support_level: WellbeingLocalSupportLevel = "none"
+    distress_pattern: WellbeingDistressPattern = "none"
+    recovery_pattern: WellbeingRecoveryPattern = "none"
+    policy_version: Literal["phase4c2-v1"] = "phase4c2-v1"
+    affects_final_assessment: Literal[False] = False
+    note: str = (
+        "Shadow policy candidate only. Content-level wellbeing evidence "
+        "interpretation — not a diagnosis, clinical risk level, or "
+        "replacement for the existing temporal wellbeing indicator."
     )
 
 
