@@ -624,6 +624,73 @@ wire into `FinalTemporalAssessment` or replace
 `compute_wellbeing_indicator()` in this phase. Next step:
 Phase 4C.4 shadow replay before any authority migration.
 
+## Phase 4C.4 — end-to-end shadow chain replay
+
+Phase 4C.4 validates the **full shadow wellbeing chain** by replaying
+structured Phase 4B-style classifier outputs through production builders:
+
+1. structured source/window classification results
+2. `build_wellbeing_evidence_context(...)`
+3. `build_wellbeing_policy_candidate(...)`
+
+Implementation:
+
+- `evaluation/wellbeing/shadow_replay_cases.py`
+- `evaluation/wellbeing/shadow_replay.py`
+- `tests/test_wellbeing_shadow_replay.py`
+
+### No model inference
+
+Replay does **not** run DeBERTa, Whisper, SigLIP, OCR, OpenRouter, Qwen,
+or video inference. Fixtures contain structured classification states only
+(no raw transcript/caption/speech text).
+
+### Production builders are used
+
+Expected fixture values are human-authored. The harness invokes the real
+evidence and policy functions to validate composition — fixtures do not
+precompute `WellbeingEvidenceContext` / `WellbeingPolicyCandidate`.
+
+### Modality provenance boundaries
+
+| Modality | Allowed global source | Local |
+| --- | --- | --- |
+| Text | `primary_text` | none |
+| Audio | `transcript` | none |
+| Caption/image authored | `caption` | none |
+| Video | `transcript` | `speech_window` |
+
+OCR / visual / SigLIP / faces are **never** personal wellbeing sources.
+
+### Privacy checks
+
+Serialized `WellbeingShadowAnalysis`, `WellbeingEvidenceContext`, and
+`WellbeingPolicyCandidate` payloads are recursively inspected for forbidden
+raw-text keys (`text`, `transcript_text`, `speech_segments`, etc.).
+
+### Deterministic chain validation
+
+Each case runs twice; outputs must match and inputs must not mutate.
+Evidence IDs used by the policy must be grounded in
+`WellbeingEvidenceContext.evidence_ids`.
+
+### Old temporary gate is not ground truth
+
+The existing `src/temporal/wellbeing.py` gate uses different evidence and
+must **not** be treated as the scoring oracle for the new shadow policy.
+Disagreement with the old gate is diagnostic only, not an automatic
+new-policy error.
+
+### Candidate remains shadow-only
+
+`affects_final_assessment=False` for evidence and policy. Phase 4C.4 does
+not wire into `FinalTemporalAssessment` or Gradio.
+
+### Next step
+
+Phase 4C.5 should be **authority-migration design** — not automatic
+replacement of the client-facing wellbeing indicator.
+
 ## Why OpenRouter is not the authority for classifier labels
 
 OpenRouter is used for **contextual temporal reasoning** over structured
@@ -647,6 +714,8 @@ labels.
   engineering POC rule, not clinically validated
 - Phase 4C.3 validates the candidate with structured scenarios only;
   validation is engineering agreement, not clinical validation
+- Phase 4C.4 replays structured classifier outputs through the full
+  evidence→policy chain without model inference; candidate remains shadow-only
 - No multimodal / facial / OCR personal-attribution path (by design)
 - Ordinary unit tests mock the classifier; no live DeBERTa in normal pytest
 
