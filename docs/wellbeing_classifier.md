@@ -801,20 +801,204 @@ Before candidate becomes authoritative, require:
 
 - [x] 4C.3 deterministic policy validation passed
 - [x] 4C.4 full shadow-chain replay passed
-- [ ] real compare-mode video validation
-- [ ] disagreement review completed
-- [ ] runtime acceptable
-- [ ] failure/fallback validated in live compare
-- [ ] rollback tested operationally
+- [x] 4C.6 live compare-mode plumbing / isolation passed
+- [ ] **production-like compare** with legacy reasoner ENABLED
+- [ ] disagreement review completed (after production-like compare)
+- [ ] runtime acceptable (explicit decision; interactive vs EOD)
+- [x] failure/fallback contract validated (unit/sim)
+- [x] rollback tested operationally (config-only)
 - [ ] UI terminology approved
 - [ ] client/product semantics approved
 - [ ] observability exists
+
+See **Phase 4C.7** for the typed readiness model. Current status: **NOT READY**.
 
 ### Candidate mode not activated yet
 
 `WELLBEING_CANDIDATE_AUTHORITY_ACTIVATED` defaults to **false**.
 Phase 4C.6 should perform controlled live compare validation before any
 authority activation design sign-off.
+
+## Phase 4C.7 — authority activation design (NOT activated)
+
+Phase 4C.7 defines the **guarded activation contract** for eventually making
+`phase4c2-v1` authoritative on **VIDEO** only.
+
+It does **not** activate candidate authority and does **not** route
+`FinalTemporalAssessment` through the candidate.
+
+Implementation (design/control plane only):
+
+- `src/wellbeing/authority_readiness.py`
+- `WellbeingAuthorityReadiness` / `WellbeingAuthorityDecision` schemas
+- `tests/test_wellbeing_authority_readiness.py`
+
+### Activation prerequisites (all required)
+
+| Flag | Meaning | Current |
+| --- | --- | --- |
+| `candidate_policy_validated` | Phase 4C.3 deterministic policy validation | True |
+| `shadow_replay_validated` | Phase 4C.4 shadow-chain replay | True |
+| `live_compare_validated` | Phase 4C.6 compare plumbing / isolation | True |
+| `production_like_compare_validated` | Compare with **legacy reasoner ENABLED** | **False** |
+| `runtime_acceptable` | Explicit runtime decision | **False** (pending) |
+| `technical_fallback_validated` | Technical fallback contract exercised | True |
+| `rollback_validated` | Config-only rollback to legacy | True |
+| `ui_semantics_approved` | Product terminology approval | **False** |
+| `observability_ready` | Required counters present | **False** |
+
+**Current readiness: NOT READY** (`ready_for_activation=False`).
+
+Do **not** infer readiness from a single env boolean.
+
+### Why Phase 4C.6 does not satisfy production-like compare
+
+Phase 4C.6 intentionally used:
+
+```text
+TemporalReasonerConfig(enabled=False)
+```
+
+That validated compare plumbing, authority isolation, diagnostics, failure
+separation, and rollback. It did **not** provide a production-like
+legacy-vs-candidate **semantic** comparison because the legacy FTA ran with
+`status=disabled` and `indicator=insufficient_evidence` under uncertain
+context.
+
+`production_like_compare_validated` becomes true **only** after a controlled
+compare-mode run with:
+
+- `WELLBEING_SHADOW_ENABLED=true`
+- `WELLBEING_AUTHORITY_MODE=compare`
+- normal legacy temporal reasoner **ENABLED**
+
+### Candidate mode guard (fail closed)
+
+Even if `WELLBEING_AUTHORITY_MODE=candidate`:
+
+- refuse unless `WELLBEING_CANDIDATE_AUTHORITY_ACTIVATED=True`
+- refuse unless readiness is satisfied
+- refuse unknown / malformed readiness
+- refuse missing or unapproved policy version
+- refuse missing evidence context
+- refuse non-video scopes (text / image / audio)
+
+Phase 4C.7 additionally keeps a design-only hard stop:
+`phase4c7_design_only_activation_not_wired` — activation is defined but not
+wired into `FinalTemporalAssessment`.
+
+### Video-only initial scope
+
+Authoritative candidate wellbeing is designed for **VIDEO** only.
+Text / image / audio may remain shadow/evaluation-only.
+
+### Candidate success (future)
+
+Successful authoritative candidate path (future) when:
+
+- `policy_candidate.status == ok`
+- indicator in `low_concern` / `moderate_concern` / `high_concern`
+- evidence IDs grounded
+- policy version approved
+- readiness guard passes
+
+### Semantic abstention
+
+Legitimate `insufficient_evidence` / conflict is **not** a system failure.
+Future authoritative behavior should preserve **Insufficient Evidence**.
+Do **not** auto-replace with legacy unless product explicitly decides.
+
+### Technical failure + fallback
+
+Technical failures (classifier unavailable/error, evidence/policy failure)
+MAY fall back to legacy **only** under future candidate authority, with:
+
+- `fallback_required` / `fallback_used=True`
+- `fallback_reason`
+- `candidate_failure_kind=technical_failure`
+- `legacy_used_as_technical_fallback=True`
+
+Never hide fallback.
+
+### Legacy is fallback, not ground truth
+
+`src/temporal/wellbeing.py` is retained for technical fallback and rollback.
+It is **not** the validation ground truth for the new policy.
+Disagreement does **not** imply candidate failure.
+
+### Runtime blocker + EOD batch note
+
+Phase 4C.6 observed ~170.7s whole pipeline / ~133s shadow on CPU.
+`runtime_acceptable` defaults false/pending — do not silently promote.
+
+Document separately:
+
+- **interactive latency suitability** (currently unsuitable)
+- **EOD batch throughput suitability** (pending volume analysis)
+
+Batch mode does **not** automatically make 133s/video acceptable.
+Possible later paths (not implemented here): dedicated inference service,
+GPU, caching, async EOD batch, cross-item batching, model/runtime
+optimization.
+
+### Window variability vs policy stability
+
+Observed eligible local windows:
+
+- earlier controlled run → window **3**
+- Phase 4C.6 → window **2**
+
+Both produced isolated local distress → `moderate_concern`.
+
+Treat **policy-level** stability (indicator, status, local support,
+distress/recovery patterns) as the readiness signal. One-index window
+movement alone is **not** policy instability. Possible sources include ASR
+segmentation / timestamps / runtime variation — do not claim root cause
+without evidence.
+
+### Rollback
+
+```text
+WELLBEING_AUTHORITY_MODE=legacy
+```
+
+No code revert. Keep `src/temporal/wellbeing.py`.
+
+### Observability requirements (before activation)
+
+Counters (no user text / secrets / clinical claims):
+
+- `candidate_available_count`
+- `candidate_semantic_abstention_count`
+- `candidate_technical_failure_count`
+- `candidate_low_count` / `moderate` / `high` / `insufficient`
+- `candidate_legacy_disagreement_count`
+- `technical_fallback_count`
+- `processing_seconds`
+
+### Future UI terminology (not approved / not wired)
+
+- Label: **Wellbeing Indicator**
+- Categories: **Low Concern / Moderate Concern / High Concern /
+  Insufficient Evidence**
+
+Do **not** map to Low/Moderate/High Stress without product approval.
+
+### Config matrix (future behavior)
+
+| Shadow | Mode | Activation | Readiness | Behavior |
+| --- | --- | --- | --- | --- |
+| false | legacy | * | * | legacy only |
+| true | legacy | * | * | legacy + shadow diagnostics |
+| true | compare | * | * | legacy authoritative + comparison |
+| true | candidate | false | * | **BLOCKED** |
+| true | candidate | true | false | **BLOCKED** |
+| true | candidate | true | true | FUTURE authoritative path (not wired in 4C.7) |
+
+### Next step
+
+Phase 4C.8 should run a **production-like compare** (reasoner enabled)
+before any authority wiring.
 
 ## Why OpenRouter is not the authority for classifier labels
 
@@ -843,6 +1027,10 @@ labels.
   evidence→policy chain without model inference; candidate remains shadow-only
 - Phase 4C.5 adds authority migration comparison controls; default remains
   legacy; candidate authority is not activated
+- Phase 4C.6 live compare (reasoner disabled) validated plumbing only;
+  production-like compare remains outstanding
+- Phase 4C.7 defines guarded activation readiness; candidate authority
+  remains **not activated** and is fail-closed
 - No multimodal / facial / OCR personal-attribution path (by design)
 - Ordinary unit tests mock the classifier; no live DeBERTa in normal pytest
 

@@ -13,6 +13,11 @@ from src.wellbeing.classifier import (
     get_wellbeing_classifier,
 )
 from src.wellbeing.evidence import build_wellbeing_evidence_context
+from src.wellbeing.authority_readiness import (
+    current_authority_readiness,
+    evaluate_candidate_authority_guard,
+    evaluate_wellbeing_authority_readiness,
+)
 from src.wellbeing.migration import (
     attach_authority_comparison,
     classify_candidate_outcome,
@@ -21,6 +26,8 @@ from src.wellbeing.migration import (
 from src.wellbeing.policy_candidate import build_wellbeing_policy_candidate
 from src.wellbeing.schemas import (
     WellbeingAuthorityComparison,
+    WellbeingAuthorityDecision,
+    WellbeingAuthorityReadiness,
     WellbeingClassificationResult,
     WellbeingEvidenceContext,
     WellbeingPolicyCandidate,
@@ -30,6 +37,8 @@ from src.wellbeing.shadow import build_wellbeing_shadow
 
 __all__ = [
     "WellbeingAuthorityComparison",
+    "WellbeingAuthorityDecision",
+    "WellbeingAuthorityReadiness",
     "WellbeingClassifier",
     "WellbeingClassificationResult",
     "WellbeingEvidenceContext",
@@ -42,5 +51,8 @@ __all__ = [
     "classify_candidate_outcome",
     "classify_wellbeing",
     "compare_wellbeing_policies",
+    "current_authority_readiness",
+    "evaluate_candidate_authority_guard",
+    "evaluate_wellbeing_authority_readiness",
     "get_wellbeing_classifier",
 ]

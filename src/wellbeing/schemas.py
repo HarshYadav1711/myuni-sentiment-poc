@@ -634,6 +634,142 @@ class WellbeingAuthorityComparison(BaseModel):
     )
 
 
+# ---------------------------------------------------------------------------
+# Phase 4C.7 — authority activation readiness design (NOT activated)
+#
+# Typed readiness + audit contracts for a future candidate-authority path.
+# Evaluating readiness must NEVER route FinalTemporalAssessment.
+# ---------------------------------------------------------------------------
+
+WellbeingAuthoritySource = Literal[
+    "legacy",
+    "candidate",
+    "legacy_technical_fallback",
+    "blocked",
+]
+
+WellbeingAuthorityScope = Literal["video", "text", "image", "audio"]
+
+
+class WellbeingAuthorityReadiness(BaseModel):
+    """Explicit multi-flag readiness for candidate authority activation.
+
+    Do not infer readiness from a single boolean config flag.
+    ``ready_for_activation`` is True only when every required prerequisite
+    is True. Phase 4C.7 ships design/evaluation helpers only — activation
+    remains blocked.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    readiness_version: str = "phase4c7-v1"
+    candidate_policy_validated: bool = False
+    shadow_replay_validated: bool = False
+    live_compare_validated: bool = False
+    production_like_compare_validated: bool = False
+    runtime_acceptable: bool = False
+    technical_fallback_validated: bool = False
+    rollback_validated: bool = False
+    ui_semantics_approved: bool = False
+    observability_ready: bool = False
+    ready_for_activation: bool = False
+    blocking_reasons: list[str] = Field(default_factory=list)
+    note: str = (
+        "Authority readiness design only. Candidate authority is not "
+        "activated. Phase 4C.6 compare with reasoner disabled does not "
+        "satisfy production_like_compare_validated."
+    )
+
+
+class WellbeingAuthorityDecision(BaseModel):
+    """Safe diagnostic audit record for future authoritative runs.
+
+    Design schema only in Phase 4C.7. No raw text. Never authorizes FTA
+    while ``affects_final_assessment`` remains False.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    requested_mode: WellbeingAuthorityMode = "legacy"
+    resolved_mode: WellbeingAuthorityMode = "legacy"
+    authority_source: WellbeingAuthoritySource = "legacy"
+    migration_scope: WellbeingAuthorityScope = "video"
+    candidate_policy_version: Optional[str] = None
+    candidate_status: Optional[str] = None
+    candidate_indicator: Optional[str] = None
+    legacy_indicator_if_available: Optional[str] = None
+    fallback_used: bool = False
+    fallback_reason: Optional[str] = None
+    candidate_failure_kind: Optional[WellbeingCandidateOutcomeKind] = None
+    legacy_used_as_technical_fallback: bool = False
+    readiness_version: Optional[str] = None
+    evidence_ids: list[str] = Field(default_factory=list)
+    blocking_reasons: list[str] = Field(default_factory=list)
+    affects_final_assessment: Literal[False] = False
+    note: str = (
+        "Authority decision audit design only. Does not alter "
+        "FinalTemporalAssessment in Phase 4C.7."
+    )
+
+
+class WellbeingPolicyStabilitySnapshot(BaseModel):
+    """Policy-level stability fields across repeated controlled runs.
+
+    Window-index movement alone is not treated as policy instability.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    run_id: str = ""
+    candidate_indicator: Optional[str] = None
+    candidate_status: Optional[str] = None
+    local_support_level: Optional[str] = None
+    distress_pattern: Optional[str] = None
+    recovery_pattern: Optional[str] = None
+    eligible_window_indices: list[int] = Field(default_factory=list)
+    policy_version: Optional[str] = None
+
+
+class WellbeingAuthorityObservabilityCounters(BaseModel):
+    """Required counter names before activation (values are runtime tallies).
+
+    No user text, secrets, or clinical interpretation.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    candidate_available_count: int = 0
+    candidate_semantic_abstention_count: int = 0
+    candidate_technical_failure_count: int = 0
+    candidate_low_count: int = 0
+    candidate_moderate_count: int = 0
+    candidate_high_count: int = 0
+    candidate_insufficient_count: int = 0
+    candidate_legacy_disagreement_count: int = 0
+    technical_fallback_count: int = 0
+    processing_seconds: float = 0.0
+
+
+class WellbeingIndicatorDisplayMapping(BaseModel):
+    """Future UI terminology mapping (design only; not wired to Gradio).
+
+    Product must approve before replacing legacy \"Stress\" display labels.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    product_label: str = "Wellbeing Indicator"
+    low_concern: str = "Low Concern"
+    moderate_concern: str = "Moderate Concern"
+    high_concern: str = "High Concern"
+    insufficient_evidence: str = "Insufficient Evidence"
+    approved: bool = False
+    note: str = (
+        "Do not map to Low/Moderate/High Stress without explicit product "
+        "approval. Internal enum values remain *_concern."
+    )
+
+
 EXPECTED_RELEVANCE_LABELS = RELEVANCE_LABELS
 EXPECTED_TARGET_LABELS = TARGET_LABELS
 EXPECTED_SIGNAL_LABELS = SIGNAL_LABELS

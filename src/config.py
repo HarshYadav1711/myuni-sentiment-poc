@@ -191,9 +191,10 @@ WELLBEING_ATTRIBUTION_MIN_TOP_SCORE = 0.0
 # When False, the pipeline must not load or call the wellbeing classifier.
 WELLBEING_SHADOW_ENABLED = False
 
-# Phase 4C.5: authority migration control plane (independent of shadow enable).
+# Phase 4C.5/4C.7: authority migration control plane (independent of shadow enable).
 # Default legacy — existing temporal wellbeing gate remains authoritative.
-# candidate mode is RESERVED and not activated in Phase 4C.5.
+# candidate mode is RESERVED. Activation flag stays False until readiness
+# (Phase 4C.7 design) is satisfied AND a later wiring phase enables it.
 WELLBEING_AUTHORITY_MODE = "legacy"
 WELLBEING_CANDIDATE_AUTHORITY_ACTIVATED = False
 
